@@ -36,7 +36,7 @@ from src.preprocess import load_data, attach_grade, label_operating_state
 from src.features import (
     DEFAULT_WARMUP, MAD_TO_STD,
     candidate_rows, minute_means, past_center, past_scale, sum_of_squares,
-    lot_robust_z,
+    lot_robust_z, MODEL_FEATURES,
 )
 from src.model import (
     HOLDOUT_LOTS, RealtimeBaseline, iforest_lot_centered, lot_z_score,
@@ -288,3 +288,185 @@ axes[1].set_ylabel('비율')
 axes[1].grid(axis='y', alpha=0.3)
 plt.tight_layout()
 save_figure(fig, '08_variable_contribution')
+
+# 9. 강종이 바뀌어도 "정상"의 기준은 같은가 (탐색 22절)
+# 정상의 수준(평소 값)과 변동 폭(평소 흔들림)을 강종별로 비교한다.
+# 둘 다 고정 척도 단위로 맞춘다.
+lot_grade_map = df_cal_labeled.groupby('LOT_NO')['GRADE'].first()
+
+# 수준: 로트별 중앙값 - 14개 로트 중앙값 (척도 단위)
+lot_level = minute.groupby(level='LOT_NO').median()
+level_units = (lot_level - lot_level.median()) / model.scale_
+
+# 변동 폭: 로트 기준값을 뺀 편차의 로트별 MAD / 고정 척도 (1이면 학습 로트 전체와 같음)
+lot_dev = (minute - past_center(minute, 'expanding', model.score_warmup)).dropna()
+spread_ratio = lot_dev.groupby(level='LOT_NO').apply(
+    lambda d: (d - d.median()).abs().median() * MAD_TO_STD
+) / model.scale_
+
+print('로트별 수준 (14개 로트 중앙값 대비, 척도 단위)')
+print(level_units.round(1).assign(GRADE=lot_grade_map).sort_values('GRADE').to_string())
+print('\n로트별 변동 폭 비율 (로트 MAD / 고정 척도)')
+print(spread_ratio.round(2).assign(GRADE=lot_grade_map).sort_values('GRADE').to_string())
+
+# 강종이 설명하는 비율(η²): 로트가 2개 이상인 강종만 쓴다
+# 4개 강종·11개 로트에서는 아무 관계가 없어도 평균 약 0.3이 나온다
+multi_lots = lot_grade_map[lot_grade_map.map(lot_grade_map.value_counts()) > 1].index
+
+
+def grade_share(table):
+    shares = {}
+    for col in table.columns:
+        values = table.loc[multi_lots, col]
+        groups = lot_grade_map.loc[multi_lots]
+        total = ((values - values.mean()) ** 2).sum()
+        between = sum(
+            len(part) * (part.mean() - values.mean()) ** 2
+            for _, part in values.groupby(groups)
+        )
+        shares[col] = between / total
+    return pd.Series(shares)
+
+
+share_table = pd.DataFrame({
+    '수준': grade_share(level_units),
+    '변동 폭': grade_share(spread_ratio),
+}).round(2)
+print(f'\n강종이 설명하는 비율 (η², {len(multi_lots)}개 로트, 관계가 없어도 약 0.3)')
+print(share_table.to_string())
+
+# 강종별 사건 빈도
+lot_events = scored.groupby('LOT_NO').agg(MINUTES=('SUMSQ', 'size'))
+lot_events['EVENTS'] = events.groupby('LOT_NO').size().reindex(lot_events.index, fill_value=0)
+grade_events = lot_events.groupby(lot_grade_map).agg(
+    LOTS=('MINUTES', 'size'), MINUTES=('MINUTES', 'sum'), EVENTS=('EVENTS', 'sum')
+)
+grade_events['EVENTS_PER_10H'] = grade_events['EVENTS'] / (grade_events['MINUTES'] / 600)
+print('\n강종별 사건 빈도')
+print(grade_events.round(2).to_string())
+
+print('\n정상의 수준은 강종마다 다르다(온도는 강종이 거의 결정, 출력은 강종과 로트가 함께 결정).')
+print('정상의 변동 폭은 강종과 거의 관계없다. 그래서 로트마다 기준값을 새로 잡고')
+print('척도는 공통으로 쓰는 실시간 기준 모델 구조가 맞다.')
+print('(로트가 1개뿐인 강종 3개는 비교에서 빠진다. 강종 baseline 이동은 데이터사전상 [가정]이다.)')
+
+# 그림 9: 로트별 수준과 변동 폭 (같은 색 = 같은 강종)
+order = lot_grade_map.sort_values().index
+grade_color = dict(zip(lot_grade_map.loc[order].unique(), plt.get_cmap('tab10').colors))
+colors = [grade_color[lot_grade_map[lot]] for lot in order]
+labels = [f'{lot_grade_map[lot]}\n{lot}' for lot in order]
+
+fig, axes = plt.subplots(2, 2, figsize=(16, 8), sharex=True)
+for row, col in enumerate(['TC-Z5', 'OP-Z4']):
+    axes[row, 0].bar(range(len(order)), level_units.loc[order, col], color=colors)
+    axes[row, 0].axhline(0, color='gray', linewidth=0.8)
+    axes[row, 0].set_title(f'{col} 로트 수준 (14개 로트 중앙값 대비, 척도 단위)')
+    axes[row, 0].set_ylabel('척도 단위')
+
+    axes[row, 1].bar(range(len(order)), spread_ratio.loc[order, col], color=colors)
+    axes[row, 1].axhline(1, color='gray', linewidth=0.8)
+    axes[row, 1].set_title(f'{col} 로트 변동 폭 (고정 척도 대비 비율)')
+    axes[row, 1].set_ylabel('비율')
+
+for ax in axes.flat:
+    ax.grid(axis='y', alpha=0.3)
+for ax in axes[1]:
+    ax.set_xticks(range(len(order)))
+    ax.set_xticklabels(labels, fontsize=8)
+
+fig.suptitle('강종별 정상의 수준과 변동 폭 (같은 색: 같은 강종)')
+plt.tight_layout()
+save_figure(fig, '09_grade_level_vs_spread')
+
+# 10. 공정 조건 변화와 설비 이상을 구분할 수 있는가 (탐색 23절)
+# 운전 상태 정보 없이 전체 시간(승온·감온 포함)에 점수를 내고,
+# 경보가 어떤 공정 조건 변화로 설명되는지 분류한다. 모델·척도·경보 기준은 위와 같다.
+#   1. 운전 상태 전환 중: 승온·감온·감온 전 변동 구간 (정기수리 전후)
+#   2. 전환 뒤 기준값 오염: 온도 유지 구간인데 기준값이 승온 구간 값에 끌려가 있음
+#      (온도 변수 하나라도 기준값과 온도 유지 수준이 3 척도 단위 넘게 다름)
+#   3. 강종변경 직후: 로트 시작(= 강종변경 시각) 후 30분 안
+#   4. 설명 안 됨: 나머지
+full_minute = (
+    df_cal_labeled.set_index('MEAS_DT')
+    .groupby('LOT_NO')[MODEL_FEATURES]
+    .resample('1min').mean()
+)
+full_state = (
+    df_cal_labeled.set_index('MEAS_DT')
+    .groupby('LOT_NO')['OP_STATE']
+    .resample('1min').first()
+)
+
+# 운전 상태 정보 없이: 기준값은 로트 시작부터의 중앙값
+full_center = past_center(full_minute, 'expanding', model.score_warmup)
+full_sumsq = (((full_minute - full_center) / model.scale_).dropna() ** 2).sum(axis=1)
+full_alarm = full_sumsq > model.limit_
+
+lot_idx = full_sumsq.index.get_level_values('LOT_NO')
+time_idx = full_sumsq.index.get_level_values('MEAS_DT')
+lot_first = df_cal_labeled.groupby('LOT_NO')['MEAS_DT'].min()
+minutes_from_start = (time_idx - lot_idx.map(lot_first)).total_seconds() / 60
+
+holding = full_state.reindex(full_minute.index).eq('온도 유지 중심·비교 후보').to_numpy()
+holding_level = full_minute.loc[holding].groupby(level='LOT_NO').median()
+temp_cols = ['TC-Z4', 'TC-Z5', 'TC-Z6']
+baseline_gap = (
+    full_center.reindex(full_sumsq.index)[temp_cols].to_numpy()
+    - holding_level.reindex(lot_idx)[temp_cols].to_numpy()
+) / model.scale_[temp_cols].to_numpy()
+
+category = pd.Series('설명 안 됨', index=full_sumsq.index)
+category[np.asarray(minutes_from_start) < 30] = '강종변경 직후'
+category[(np.abs(baseline_gap) > 3).any(axis=1)] = '전환 뒤 기준값 오염'
+category[full_state.reindex(full_sumsq.index).isin(
+    ['승온 구간 추정', '감온 구간 추정', '감온 전 변동 구간']).to_numpy()] = '운전 상태 전환 중'
+
+alarm_summary = pd.DataFrame({
+    '분': category.value_counts(),
+    '경보 분': category[full_alarm].value_counts(),
+}).fillna(0).astype(int)
+alarm_summary['경보 비율(%)'] = (alarm_summary['경보 분'] / alarm_summary['분'] * 100).round(1)
+alarm_summary['경보 중 몫(%)'] = (alarm_summary['경보 분'] / full_alarm.sum() * 100).round(1)
+
+print(f'운전 상태 정보 없이: 점수 있는 분 {len(full_sumsq)}, 경보 분 {int(full_alarm.sum())}')
+print(alarm_summary.to_string())
+
+# 운전 상태 정보를 쓸 때 = 위의 실시간 기준 모델 (온도 유지 구간만, 구간 시작부터 기준값)
+held_alarm = int((scored['SUMSQ'] > model.limit_).sum())
+after_grade_change = (events['START'] - events['LOT_NO'].map(lot_first)).dt.total_seconds() / 60 < 30
+print(f'\n운전 상태 정보를 쓸 때: 점수 있는 분 {len(scored)}, 경보 분 {held_alarm} '
+      f'({held_alarm / len(scored):.1%}), 사건 {len(events)} '
+      f'(강종변경 직후 {int(after_grade_change.sum())}, 설명 안 됨 {int((~after_grade_change).sum())})')
+
+print('\n운전 상태 정보 없이 경보를 내면 경보의 대부분이 정기수리 전후의 운전 상태 변화에서 나온다.')
+print('강종변경은 로트 시작에서 기준값을 새로 잡으므로 경보를 거의 만들지 않는다.')
+print('공정 조건 변화를 걸러 내고 남는 경보는 설계한 오경보 수준(학습 로트 상위 1%)과 비슷하다.')
+print('정답 라벨이 없으므로 이 경보는 "설명되지 않은 이상 후보"까지만 말할 수 있다.')
+
+# 그림 10: 승온 로트의 운전 상태 정보 없는 점수와 경보 분류
+scored_full = full_sumsq.rename('SUMSQ').reset_index()
+scored_full['CATEGORY'] = category.to_numpy()
+category_color = {
+    '운전 상태 전환 중': 'orange',
+    '전환 뒤 기준값 오염': 'purple',
+    '강종변경 직후': 'green',
+    '설명 안 됨': 'red',
+}
+
+fig, axes = plt.subplots(2, 1, figsize=(14, 7))
+for ax, lot_no in zip(axes, [240061, 240117]):
+    part = scored_full.loc[scored_full['LOT_NO'].eq(lot_no)]
+    ax.plot(part['MEAS_DT'], part['SUMSQ'], color='black', linewidth=1)
+    ax.axhline(model.limit_, color='gray', linestyle=':')
+    for name, color in category_color.items():
+        over = part.loc[part['CATEGORY'].eq(name) & (part['SUMSQ'] > model.limit_)]
+        ax.scatter(over['MEAS_DT'], over['SUMSQ'], s=10, color=color, label=name)
+    ax.set_yscale('log')
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f'{v:g}'))
+    ax.set_title(f'로트 {lot_no} | 운전 상태 정보 없이 낸 점수와 경보 분류')
+    ax.set_ylabel('z 제곱합')
+    ax.grid(alpha=0.3)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+    ax.legend(loc='upper right', fontsize=8)
+plt.tight_layout()
+save_figure(fig, '10_full_time_alarm_category')

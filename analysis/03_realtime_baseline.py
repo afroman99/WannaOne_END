@@ -662,3 +662,124 @@ for ax in axes[:, 0]:
 fig.suptitle('시간별 공통 변동성 (빨간 막대: 실시간 기준 모델 경보가 있던 시간)')
 plt.tight_layout()
 save_figure(fig, '12_hourly_volatility')
+
+# 13. 시계열 ③: 연중 추세 (로트 사이) (탐색 26절)
+# 1년(2024-01 ~ 2024-12)에 걸쳐 로트 사이에서 수준, 변동성, 경보 빈도가 서서히 바뀌는지 본다.
+# - 기간: CR1 정기수리 두 번(2024-06-10~14, 2024-11-05~10)으로 나눈다.
+# - 수준: 로트 중앙값 - 같은 강종 로트 평균 (척도 단위). 로트가 2개 이상인 강종 11개 로트만 쓰고,
+#   날짜와의 순위 상관을 같은 강종 안에서 날짜를 섞은 우연 범위와 비교한다.
+# - 변동성·경보: 강종과 거의 관계없으므로(9절) 14개 로트를 모두 쓴다.
+# 주의: 로트 2개 이상 강종은 모두 정기수리를 사이에 두고 나뉘어 있어 날짜와 정기수리 효과를 구분할 수 없다.
+lot_start = df_cal_labeled.groupby('LOT_NO')['MEAS_DT'].min()
+lot_day = (lot_start - pd.Timestamp('2024-01-01')).dt.total_seconds() / 86400
+shutdowns = [pd.Timestamp('2024-06-10'), pd.Timestamp('2024-11-05')]   # CR1 정기수리 시작일
+lot_period = pd.cut(
+    lot_start, [pd.Timestamp('2024-01-01'), *shutdowns, pd.Timestamp('2025-01-01')],
+    labels=['1차 정기수리 전', '1~2차 사이', '2차 정기수리 후'],
+)
+
+# 강종 효과를 뺀 수준 vs 날짜
+within_grade = (
+    (lot_level - lot_level.groupby(lot_grade_map).transform('mean')) / model.scale_
+).loc[multi_lots]
+
+
+def shuffle_within(values, groups):
+    shuffled = values.copy()
+    for idx in values.groupby(groups).groups.values():
+        shuffled.loc[idx] = rng.permutation(values.loc[idx].to_numpy())
+    return shuffled
+
+
+year_level_rows = []
+for col in MODEL_FEATURES:
+    rho = stats.spearmanr(lot_day.loc[multi_lots], within_grade[col])[0]
+    null = np.array([
+        stats.spearmanr(shuffle_within(lot_day.loc[multi_lots], lot_grade_map.loc[multi_lots]),
+                        within_grade[col])[0]
+        for _ in range(5000)
+    ])
+    year_level_rows.append({
+        '변수': col, '순위 상관': rho, 'p': np.mean(np.abs(null) >= abs(rho) - 1e-12),
+        '강종 안 로트 차이 범위(척도 단위)': within_grade[col].max() - within_grade[col].min(),
+    })
+print('강종 효과를 뺀 수준과 날짜의 순위 상관 (11개 로트)')
+print(pd.DataFrame(year_level_rows).round(2).to_string(index=False))
+
+print('\n강종별 출력 수준 (원래 값, 날짜순)')
+print(lot_level.loc[multi_lots, ['OP-Z4', 'OP-Z5', 'OP-Z6']].round(1)
+      .assign(GRADE=lot_grade_map, PERIOD=lot_period, DAY=lot_day.round(0))
+      .sort_values(['GRADE', 'DAY']).to_string())
+
+# 변동성과 경보 vs 날짜 (14개 로트)
+lot_diff_vol = minute_diff.groupby(level='LOT_NO').agg(lambda s: block_mad(s.to_numpy(), 0)) / diff_ref
+lot_minutes = scored.groupby('LOT_NO').size()
+year_table = pd.DataFrame({
+    'GRADE': lot_grade_map,
+    'PERIOD': lot_period,
+    'DAY': lot_day,
+    '분': lot_minutes,
+    '차분 변동성': np.exp(np.log(lot_diff_vol[MODEL_FEATURES]).mean(axis=1)),
+    '변동 폭 비율': np.exp(np.log(spread_ratio).mean(axis=1)),
+    '경보 분(%)': scored.groupby('LOT_NO')['SUMSQ'].apply(lambda s: (s > model.limit_).mean() * 100),
+    '사건': events.groupby('LOT_NO').size().reindex(lot_minutes.index, fill_value=0),
+}).sort_values('DAY')
+year_table['사건/10시간'] = year_table['사건'] / (year_table['분'] / 600)
+print('\n로트별 변동성과 경보 (날짜순)')
+print(year_table.round(2).to_string())
+
+print('\n날짜와의 순위 상관 (날짜를 섞은 우연 범위와 비교)')
+for col in ['차분 변동성', '변동 폭 비율', '경보 분(%)', '사건/10시간']:
+    rho = stats.spearmanr(year_table['DAY'], year_table[col])[0]
+    null = np.array([stats.spearmanr(year_table['DAY'], rng.permutation(year_table[col].to_numpy()))[0]
+                     for _ in range(5000)])
+    print(f'  {col}: {rho:+.2f} (p = {np.mean(np.abs(null) >= abs(rho)):.2f})')
+
+period_table = year_table.groupby('PERIOD', observed=True).agg(
+    로트=('분', 'size'), 분=('분', 'sum'), 사건=('사건', 'sum'),
+    차분_변동성_중앙값=('차분 변동성', 'median'), 변동_폭_비율_중앙값=('변동 폭 비율', 'median'),
+)
+period_table['사건/10시간'] = period_table['사건'] / (period_table['분'] / 600)
+print('\n정기수리 기준 기간별')
+print(period_table.round(2).to_string())
+
+# 짧은 로트는 로트 끝·시작 사건 비중이 커서 경보 비율이 높게 나온다
+print('\n로트 길이와 경보 분 비율의 순위 상관:',
+      round(stats.spearmanr(year_table['분'], year_table['경보 분(%)'])[0], 2))
+
+print('\n수준, 변동성, 경보 빈도 모두 날짜와의 관계가 우연 범위 안이다.')
+print('로트 14개(연중 1.1%)로는 검출력이 약하므로 "추세가 없다"보다 "확인할 수 없다"가 정확하다.')
+print('운영에서는 정기수리 뒤마다 척도와 경보 기준을 다시 확인하는 절차를 둔다.')
+
+# 그림 13: 강종 효과를 뺀 출력 수준(위)과 로트 변동성·사건 빈도(아래)의 연중 흐름
+fig, axes = plt.subplots(2, 2, figsize=(16, 8), sharex=True)
+for ax in axes.flat:
+    for start, end in [('2024-06-10', '2024-06-14'), ('2024-11-05', '2024-11-10')]:
+        ax.axvspan(pd.Timestamp(start), pd.Timestamp(end), color='orange', alpha=0.3)
+    ax.grid(alpha=0.3)
+
+for ax, col in zip(axes[0], ['OP-Z4', 'OP-Z6']):
+    for grade, lots_in_grade in lot_grade_map.loc[multi_lots].groupby(lot_grade_map.loc[multi_lots]):
+        idx = lot_start.loc[lots_in_grade.index].sort_values().index
+        ax.plot(lot_start.loc[idx], within_grade.loc[idx, col], marker='o',
+                color=grade_color[grade], label=grade)
+    ax.axhline(0, color='gray', linewidth=0.8)
+    ax.set_title(f'{col} 수준: 같은 강종 로트 평균 대비 (척도 단위)')
+    ax.set_ylabel('척도 단위')
+    ax.legend(fontsize=8)
+
+point_size = year_table['분'] / 5
+axes[1, 0].scatter(lot_start.loc[year_table.index], year_table['차분 변동성'], s=point_size, color='tab:blue')
+axes[1, 0].axhline(1, color='gray', linewidth=0.8)
+axes[1, 0].set_title('로트 변동성 (1분 차분 MAD, 전체 로트 = 1, 점 크기: 로트 길이)')
+axes[1, 0].set_ylabel('비율')
+
+axes[1, 1].scatter(lot_start.loc[year_table.index], year_table['사건/10시간'], s=point_size, color='tab:red')
+axes[1, 1].set_title('로트별 10시간당 사건 수 (점 크기: 로트 길이)')
+axes[1, 1].set_ylabel('사건 / 10시간')
+
+for ax in axes[1]:
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%m월'))
+fig.suptitle('연중 흐름 (주황 구간: CR1 정기수리)')
+plt.tight_layout()
+save_figure(fig, '13_year_trend')

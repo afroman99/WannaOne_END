@@ -180,3 +180,10 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 *.csv
+# 개인 탐색용 노트북은 커밋하지 않음 (커밋은 .py만)
+*.ipynb
+
+# macOS
+.DS_Store
+
+# 데이터는 data/ 폴더에 별도로 둔다 (위 *.csv 규칙)

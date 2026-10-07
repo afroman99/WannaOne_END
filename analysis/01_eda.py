@@ -77,6 +77,55 @@ print(lot_maint_summary[
      'NEXT_MNT_TYPE', 'HOURS_TO_NEXT_DETC']
 ].to_string(index=False))
 
+# 정비 기록 개요와 부품교체 연결
+print('\nCAL 정비 작업:', len(df_m_cal), '건', df_m_cal['MNT_TYPE'].value_counts().to_dict())
+part_change = pd.read_csv(ROOT / 'data' / 'G-02_부품교체이력.csv')
+part_master = pd.read_csv(ROOT / 'data' / 'G-01_부품마스터.csv')
+cal_parts = (
+    df_m_cal[['WO_NO', 'MNT_TYPE', 'PART_CHG']]
+    .merge(part_change, on='WO_NO')
+    .merge(part_master[['PART_CD', 'PART_NM']], on='PART_CD', how='left')
+)
+flag_y = set(df_m_cal.loc[df_m_cal['PART_CHG'].eq('Y'), 'WO_NO'])
+print('부품교체:', cal_parts['WO_NO'].nunique(), '건 /',
+      cal_parts['PART_NM'].value_counts().to_dict())
+print('PART_CHG=Y와 부품교체이력이 다른 작업:', len(flag_y ^ set(cal_parts['WO_NO'])))
+
+# 발견 시각은 교대 시각(06~07, 14~15, 22~23시)에 몰려 있다
+# 실제 발생 시점이 아니라 교대 때의 기록 시각으로 본다
+shift_hours = [6, 7, 14, 15, 22, 23]
+maint_all = pd.read_csv(ROOT / 'data' / 'G-02_정비이력.csv', parse_dates=['DETC_DT'])
+print(f"\n발견 시각이 교대 시각대인 비율: CAL {df_m_cal['DETC_DT'].dt.hour.isin(shift_hours).mean():.0%}"
+      f" / 전체 설비 {maint_all['DETC_DT'].dt.hour.isin(shift_hours).mean():.0%} (고르다면 25%)")
+
+# 로트 측정 중의 정비 작업과 센서: 정지 시간이 기록돼 있는데 로는 운전 중이다
+lot_span = df_cal.groupby('LOT_NO')['MEAS_DT'].agg(['min', 'max'])
+lot_hours = (lot_span['max'] - lot_span['min']).dt.total_seconds().sum() / 3600
+print(f'로트 측정 시간 합계: {lot_hours:.1f}시간 (2024년의 {lot_hours / 8784:.1%})')
+
+overlap_rows = []
+for work in df_m_cal.itertuples():
+    for lot_no, span in lot_span.iterrows():
+        start, end = max(work.STRT_DT, span['min']), min(work.END_DT, span['max'])
+        if start >= end:
+            continue
+        sensor = df_cal.loc[
+            df_cal['LOT_NO'].eq(lot_no) & df_cal['MEAS_DT'].between(start, end),
+            ['TC-Z4', 'OP-Z4']
+        ]
+        overlap_rows.append({
+            'WO_NO': work.WO_NO, 'MNT_TYPE': work.MNT_TYPE, 'LOT_NO': lot_no,
+            '작업': f'{work.STRT_DT:%m-%d %H:%M}~{work.END_DT:%H:%M}',
+            '정지(분)': work.DOWN_MIN,
+            'TC-Z4 중앙값': round(sensor['TC-Z4'].median(), 1),
+            'OP-Z4 중앙값': round(sensor['OP-Z4'].median(), 1),
+        })
+
+print('\n로트 측정 중에 기록된 정비 작업과 그 시간의 센서')
+print(pd.DataFrame(overlap_rows).to_string(index=False))
+print('정지 시간이 기록돼 있지만 로는 약 860°C를 유지하며 운전 중이다.')
+print('정비 기록은 센서 데이터와 맞지 않으므로 설비 이상의 검증 수단으로 쓰지 않는다.')
+
 # 4. 운전 상태: 승온·감온·감온 전 변동 구간
 df_cal_labeled = label_operating_state(df_cal, lot_grade)
 

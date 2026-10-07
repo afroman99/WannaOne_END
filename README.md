@@ -10,7 +10,7 @@ python analysis/02_model_compare.py
 python analysis/03_realtime_baseline.py
 ```
 
-- 필요한 패키지: pandas, numpy, matplotlib, scikit-learn (Python 3.14, pandas 3.0, scikit-learn 1.9에서 확인)
+- 필요한 패키지: pandas, numpy, scipy, matplotlib, scikit-learn (Python 3.14, pandas 3.0, scikit-learn 1.9에서 확인)
 - 프로젝트 루트에서 실행한다. 데이터는 `data/` 폴더에 둔다(아래 "데이터 출처").
 - 그림은 `figures/`에 저장된다.
 - `03_realtime_baseline.py`가 메인이다. 데이터 불러오기부터 모델 학습·평가까지 처음부터 끝까지 실행한다.

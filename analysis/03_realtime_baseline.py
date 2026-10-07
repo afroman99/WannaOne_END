@@ -31,6 +31,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.ticker import FuncFormatter
+from scipy import stats
 
 from src.preprocess import load_data, attach_grade, label_operating_state
 from src.features import (
@@ -470,3 +471,194 @@ for ax, lot_no in zip(axes, [240061, 240117]):
     ax.legend(loc='upper right', fontsize=8)
 plt.tight_layout()
 save_figure(fig, '10_full_time_alarm_category')
+
+# 11. 시계열 ①: 로트 안의 느린 추세(드리프트) (탐색 24절)
+# 온도 유지 구간에서 몇 시간에 걸쳐 수준이 서서히 바뀌는지 본다.
+# - 로트별 1분 평균에 Theil-Sen 기울기(중앙값 기반, 짧은 사건에 덜 흔들림)를 맞춘다.
+# - 로트 전체 변화량 = 기울기 x 로트 길이 / 고정 척도 (1이면 평소 흔들림 하나만큼)
+# - 1분 데이터는 앞뒤 값이 이어져 p값을 믿기 어려우므로 변화량의 크기로 판단한다.
+# - 5시간 미만 로트는 로트 끝·시작의 사건에 끌려가므로 드리프트로 판단하지 않는다.
+drift_rows = []
+third_rows = []
+for lot_no, lot in minute.groupby(level='LOT_NO'):
+    lot = lot.droplevel('LOT_NO')
+    hours = (lot.index - lot.index[0]).total_seconds() / 3600
+    row = {'LOT_NO': lot_no, 'GRADE': lot_grade_map[lot_no], 'HOURS': round(hours.max(), 1)}
+    for col in MODEL_FEATURES:
+        valid = lot[col].notna().to_numpy()
+        slope = stats.theilslopes(lot[col].to_numpy()[valid], hours[valid])[0]
+        row[col] = slope * hours.max() / model.scale_[col]
+    drift_rows.append(row)
+
+    # 확인용: 마지막 1/3 중앙값 - 처음 1/3 중앙값
+    third = len(lot) // 3
+    third_rows.append(
+        ((lot.iloc[-third:].median() - lot.iloc[:third].median()) / model.scale_).rename(lot_no)
+    )
+
+drift = pd.DataFrame(drift_rows).set_index('LOT_NO').sort_values('HOURS', ascending=False)
+third_diff = pd.DataFrame(third_rows).loc[drift.index]
+long_lots = drift.index[drift['HOURS'] >= 5]
+
+print('로트 전체 기간 동안의 변화량 (척도 단위)')
+print(drift.round(1).to_string())
+print('\n확인용: 마지막 1/3 중앙값 - 처음 1/3 중앙값 (척도 단위)')
+print(third_diff.round(1).to_string())
+print(f'\n5시간 이상 로트({len(long_lots)}개)의 변화량 범위 (척도 단위)')
+print(drift.loc[long_lots, MODEL_FEATURES].agg(['min', 'max']).round(1).to_string())
+
+# 실시간 기준 모델이 드리프트를 잡을 수 있는가
+# 기준값이 로트 시작부터의 중앙값이라 직선 드리프트를 절반쯤 따라간다.
+# 로트 끝에서 z는 대략 (전체 변화량 / 2)이므로, 경보에는 변화량이 2 x sqrt(경보 기준) 이상 필요하다.
+single_var_limit = np.sqrt(model.limit_)
+print(f'\n드리프트만으로 경보가 나려면 로트 전체 변화량이 약 {2 * single_var_limit:.1f} 척도 단위 이상이어야 한다.')
+print(f'5시간 이상 로트에서 관찰된 최대 변화량: '
+      f'{drift.loc[long_lots, MODEL_FEATURES].abs().max().max():.1f} 척도 단위')
+
+print('\n온도는 매우 평평하고, 출력만 조금 움직인다. 같은 온도에서 출력이 꾸준히 오른 로트는 240069 하나다.')
+print('이 정도 드리프트는 실시간 기준 모델로 잡을 수 없으므로 별도 드리프트 지표가 필요하다.')
+
+# 그림 11: 출력이 같은 온도에서 오른 로트(240069)와 같은 강종의 긴 로트(240091)
+fig, axes = plt.subplots(2, 2, figsize=(16, 7), sharey='row')
+for col_idx, lot_no in enumerate([240069, 240091]):
+    lot = minute.loc[lot_no].resample('10min').mean()
+    hours = (lot.index - lot.index[0]).total_seconds() / 3600
+    for row_idx, col in enumerate(['TC-Z4', 'OP-Z4']):
+        ax = axes[row_idx, col_idx]
+        ax.plot(lot.index, lot[col], color='black', linewidth=1)
+        valid = lot[col].notna()
+        slope, intercept = stats.theilslopes(lot[col][valid], hours[valid])[:2]
+        ax.plot(lot.index, intercept + slope * hours, color='red', linestyle='--',
+                label=f'Theil-Sen 추세: 전체 {drift.loc[lot_no, col]:+.1f} 척도 단위')
+        ax.set_title(f'로트 {lot_no} ({lot_grade_map[lot_no]}) | {col} 10분 평균')
+        ax.legend(loc='upper left', fontsize=8)
+        ax.grid(alpha=0.3)
+        ax.xaxis.set_major_locator(mdates.HourLocator(interval=2))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+axes[0, 0].set_ylabel('온도 (°C)')
+axes[1, 0].set_ylabel('제어출력')
+plt.tight_layout()
+save_figure(fig, '11_within_lot_drift')
+
+# 12. 시계열 ②: 변동성의 시간 변화 (탐색 25절)
+# 고정 척도는 평소 흔들림이 시간에 따라 같다고 가정한다. 이 가정이 맞는지 본다.
+# - 1분 평균의 1차 차분(이번 분 - 직전 분)으로 느린 추세와 수준 차이를 뺀다.
+# - 시간별 변동성 = 1시간 블록 안 차분의 MAD / 전체 로트의 같은 값 (1이면 평소)
+# - 공통 변동성 = 6개 변수 시간별 변동성의 기하평균
+# - 로트 안 추세와 지속성은 같은 로트의 시간 순서를 섞은 우연 범위와 비교한다.
+def block_mad(values, min_count=20):
+    values = values[~np.isnan(values)]
+    if len(values) < min_count:  # 분이 20개 미만인 블록은 뺀다
+        return np.nan
+    return np.median(np.abs(values - np.median(values))) * MAD_TO_STD
+
+
+minute_diff = minute.groupby(level='LOT_NO').diff()
+diff_ref = minute_diff.apply(lambda s: block_mad(s.to_numpy()))
+
+vol_blocks = []
+for lot_no, lot in minute_diff.groupby(level='LOT_NO'):
+    lot = lot.droplevel('LOT_NO')
+    hourly = lot.resample('60min').agg(lambda s: block_mad(s.to_numpy())) / diff_ref
+    hourly['MINUTES'] = lot.resample('60min').size()
+    hourly['LOT_NO'] = lot_no
+    vol_blocks.append(hourly.dropna(subset=MODEL_FEATURES, how='all'))
+hourly_vol = pd.concat(vol_blocks).reset_index().set_index(['LOT_NO', 'MEAS_DT'])
+hourly_vol['COMMON'] = np.exp(np.log(hourly_vol[MODEL_FEATURES]).mean(axis=1))
+
+print('시간 블록', len(hourly_vol), '/ 공통 변동성 범위',
+      hourly_vol['COMMON'].agg(['min', 'median', 'max']).round(2).to_dict())
+
+# 변수끼리 같은 시간에 함께 흔들리는가 (로트 평균을 뺀 log 변동성의 순위 상관)
+log_vol = np.log(hourly_vol[MODEL_FEATURES])
+log_vol_c = log_vol - log_vol.groupby(level='LOT_NO').transform('mean')
+print('\n변수 사이 시간별 변동성 상관 (로트 안)')
+print(log_vol_c.corr(method='spearman').round(2).to_string())
+
+# 로트 안 추세: 처음 대비 끝 배율 (5시간 이상 로트)
+rng = np.random.default_rng(0)
+
+
+def trend_ratio(log_values):
+    n = len(log_values)
+    return np.exp(stats.theilslopes(log_values, np.arange(n))[0] * (n - 1))
+
+
+trend_rows = []
+for lot_no, part in hourly_vol.groupby(level='LOT_NO'):
+    values = np.log(part['COMMON'].to_numpy())
+    if len(values) < 5:
+        continue
+    observed = trend_ratio(values)
+    null = np.array([trend_ratio(rng.permutation(values)) for _ in range(2000)])
+    trend_rows.append({
+        'LOT_NO': lot_no, 'GRADE': lot_grade_map[lot_no], 'BLOCKS': len(values),
+        'RATIO': observed,
+        'CHANCE_LO': np.quantile(null, 0.025), 'CHANCE_HI': np.quantile(null, 0.975),
+        'P': np.mean(np.abs(np.log(null)) >= abs(np.log(observed))),
+    })
+vol_trend = pd.DataFrame(trend_rows).set_index('LOT_NO')
+print('\n로트 안 공통 변동성 추세 (끝/처음 배율, 우연 범위는 시간 순서를 섞은 95%)')
+print(vol_trend.round(2).to_string())
+
+
+# 지속성: 흔들리는 시간이 다음 시간으로 이어지는가 (1시간 시차 자기상관, 로트 안)
+def lag1_corr(log_series):
+    num = den = 0.0
+    for _, part in log_series.groupby(level='LOT_NO'):
+        values = part.to_numpy() - part.mean()
+        if len(values) < 3:
+            continue
+        num += (values[1:] * values[:-1]).sum()
+        den += (values ** 2).sum()
+    return num / den
+
+
+log_common = np.log(hourly_vol['COMMON'])
+lag1_observed = lag1_corr(log_common)
+lag1_null = np.array([
+    lag1_corr(log_common.groupby(level='LOT_NO').transform(
+        lambda s: pd.Series(rng.permutation(s.to_numpy()), index=s.index)))
+    for _ in range(1000)
+])
+print(f'\n1시간 시차 자기상관 {lag1_observed:.2f} '
+      f'(우연 범위 {np.quantile(lag1_null, 0.025):.2f} ~ {np.quantile(lag1_null, 0.975):.2f}, '
+      f'p = {np.mean(lag1_null >= lag1_observed):.2f})')
+
+# 경보와의 관계: 공통 변동성 4분위별 경보 분 비율
+score_hour = scored.assign(
+    MEAS_DT=scored['MEAS_DT'].dt.floor('60min'),
+    ALARM=scored['SUMSQ'] > model.limit_,
+).groupby(['LOT_NO', 'MEAS_DT'])['ALARM'].sum()
+hourly_vol['ALARM_MIN'] = score_hour.reindex(hourly_vol.index).fillna(0).astype(int)
+hourly_vol['VOL_BAND'] = pd.qcut(hourly_vol['COMMON'], 4, labels=['하위 25%', '25~50%', '50~75%', '상위 25%'])
+
+band_alarm = hourly_vol.groupby('VOL_BAND', observed=True).agg(
+    블록=('MINUTES', 'size'), 분=('MINUTES', 'sum'), 경보_분=('ALARM_MIN', 'sum'),
+    변동성_하한=('COMMON', 'min'), 변동성_상한=('COMMON', 'max'),
+)
+band_alarm['경보_비율(%)'] = band_alarm['경보_분'] / band_alarm['분'] * 100
+print('\n공통 변동성 4분위별 경보')
+print(band_alarm.round(2).to_string())
+
+print('\n변동성은 시간마다 0.6~2배로 오르내리고 구역이 함께 흔들린다. 로트 안에서 꾸준히 커지는 로트는 뚜렷하지 않다.')
+print('경보는 흔들리는 시간에 몰린다(변동성과 경보는 같은 편차에서 계산하므로 일부는 당연히 겹친다).')
+print('척도를 시간별로 바꾸면 흔들리는 시간 자체를 못 보므로 고정 척도를 유지하고,')
+print('경보를 볼 때 최근 1시간 공통 변동성을 함께 보여 준다.')
+
+# 그림 12: 5시간 이상 로트의 시간별 공통 변동성 (빨간 막대: 경보가 있던 시간)
+fig, axes = plt.subplots(2, 4, figsize=(18, 7), sharey=True)
+for ax, lot_no in zip(axes.flat, vol_trend.index):
+    part = hourly_vol.loc[lot_no]
+    colors = np.where(part['ALARM_MIN'] > 0, 'tab:red', 'tab:gray')
+    ax.bar(np.arange(len(part)), part['COMMON'], color=colors)
+    ax.axhline(1, color='black', linewidth=0.8)
+    ax.set_title(f'로트 {lot_no} ({lot_grade_map[lot_no]}) | 끝/처음 {vol_trend.loc[lot_no, "RATIO"]:.2f}배',
+                 fontsize=10)
+    ax.set_xlabel('로트 시작 후 시간 블록')
+    ax.grid(axis='y', alpha=0.3)
+for ax in axes[:, 0]:
+    ax.set_ylabel('공통 변동성 (평소 = 1)')
+fig.suptitle('시간별 공통 변동성 (빨간 막대: 실시간 기준 모델 경보가 있던 시간)')
+plt.tight_layout()
+save_figure(fig, '12_hourly_volatility')

@@ -14,6 +14,7 @@
   1. 데이터 기본 정보        2. 시나리오와 원인          3·5. 대표 시나리오 비교 그래프
   6. 센서별 열화 변화량       7. 조기경보의 한계          8. 운전조건 이벤트
   9. 센서 간 관계            10. 원인 구분 가능성         11. 정비 효과
+  12. 시계열 분석: 주기·추세·변동성·상태 변화 구간
   (노트북 4절 '대표 시나리오 기본 점검'은 1-3~1-5와 결과가 같아 생략)
 
 진단 정답과 고장 시각은 비교 대상을 나누는 데만 쓰고, 특징량으로 쓰지 않는다.
@@ -611,5 +612,203 @@ for r in part.itertuples():
                  '정비 끝 → 다음 열화(h)': (nxt - r.END_DT).total_seconds() / 3600 if pd.notna(nxt) else np.nan,
                  '정비 끝 → 고장(h)': (f - r.END_DT).total_seconds() / 3600 if pd.notna(f) else np.nan})
 show(pd.DataFrame(rows).round(1), '11-3. 부분 정비 뒤 다음 열화·고장까지 걸린 시간')
+
+# 12. 시계열 분석: 주기·추세·변동성·상태 변화 구간 ─────────────────────────────────
+
+section('12. 시계열 분석: 주기·추세·변동성·상태 변화 구간')
+
+pos = ct.groupby('SCENARIO_ID').indices          # 시나리오별 원자료 행 위치 (ct는 시나리오·시각 순서)
+
+
+def raw_window(sid, t0, t1):
+    w = ct.iloc[pos[sid]]
+    return w[(w['RUNNING'] == 1) & (w['MEAS_DT'] >= t0) & (w['MEAS_DT'] < t1)]
+
+
+def acf(x, max_lag):
+    x = np.asarray(x, dtype=float)
+    x = x - np.nanmean(x)
+    x = np.nan_to_num(x)
+    d = (x * x).sum()
+    return np.array([(x[:len(x) - k] * x[k:]).sum() / d for k in range(max_lag + 1)])
+
+
+def mld_period(w):
+    """5초 몰드 레벨의 주된 주기(분)와 흔들림 폭(표준편차)"""
+    x = w['MLD-LVL'].interpolate().bfill().values
+    a = acf(x, 720)
+    return (120 + a[120:481].argmax()) * 5 / 60, x.std(), a      # 자기상관이 가장 큰 시차(10~40분 사이) = 주기
+
+
+# 12-1. 주기 (5초): 정상 시나리오는 첫 운전 구간 2~8시간, 열화는 주 원인 열화 구간의 끝 6시간
+rows, ac_n, ac_d = [], [], []
+for sid in scen_type.query('MODE == "normal"')['SCENARIO_ID']:
+    w = raw_window(sid, START[sid] + pd.Timedelta(hours=2), START[sid] + pd.Timedelta(hours=8))
+    if len(w) > 2000:
+        per, amp, a = mld_period(w)
+        rows.append({'구간': '정상', '주기(분)': per, '흔들림 폭(mm)': amp})
+        ac_n.append(a)
+for r in dg[dg['FAULT_MODE'].isin(MAIN_MODES)].itertuples():
+    w = raw_window(r.SCENARIO_ID, max(r.START_AT, r.END_AT - pd.Timedelta(hours=6)), r.END_AT)
+    if len(w) > 2000:
+        per, amp, a = mld_period(w)
+        rows.append({'구간': '열화 (끝 6시간)', '주기(분)': per, '흔들림 폭(mm)': amp})
+        ac_d.append(a)
+per_t = pd.DataFrame(rows)
+show(per_t.groupby('구간').agg(구간수=('주기(분)', 'size'), 주기_중앙값=('주기(분)', 'median'),
+                             주기_최소=('주기(분)', 'min'), 주기_최대=('주기(분)', 'max'),
+                             흔들림폭_중앙값=('흔들림 폭(mm)', 'median')).round(2),
+     '12-1. 몰드 레벨(5초)의 주기와 흔들림 폭 → 주기는 그대로, 폭만 커진다')
+
+# 12-1. 주기 (1시간): 정상 시나리오의 부하, 인발 부하 원값, 보정한 변화량
+nh1 = hr[(hr['MODE'] == 'normal') & (hr['SEG'] == 0)].sort_values(['SCENARIO_ID', 'HOUR'])
+ac_h = {c: np.median([acf(g[c].values, 36) for _, g in nh1.groupby('SCENARIO_ID') if g[c].notna().sum() > 48], axis=0)
+        for c in ['LOAD', 'WD-LOD', 'WDL_C_D']}
+lag_load = int(np.argmax(ac_h['LOAD'][6:]) + 6)
+show(pd.DataFrame({'부하 주기의 자기상관': {c: ac_h[c][lag_load] for c in ac_h},
+                   '부하와의 상관 (정상 1시간)': {c: nh1[c].corr(nh1['LOAD']) for c in ac_h}}).round(2),
+     f'12-1. 부하의 주된 주기 {lag_load}시간 → 인발 부하에는 남고, 보정한 변화량에서는 부하와의 상관이 사라진다')
+show(pd.DataFrame(ac_h).iloc[::3].round(2).T, '12-1. 1시간 자기상관 (정상 시나리오 중앙값, 3시간 간격)')
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+lag_min = np.arange(721) * 5 / 60
+amp = per_t.groupby('구간')['흔들림 폭(mm)'].median()
+for a, color, ls, name in [(ac_n, '#9e9e9e', '-', f'정상 ({len(ac_n)}개 시나리오, 폭 {amp["정상"]:.2f}mm)'),
+                           (ac_d, '#eb5757', '--', f'열화 끝 6시간 ({len(ac_d)}개 구간, 폭 {amp["열화 (끝 6시간)"]:.2f}mm)')]:
+    m = np.median(a, axis=0)
+    axes[0].plot(lag_min, m, color=color, ls=ls, lw=2, label=name)
+    axes[0].fill_between(lag_min, *np.percentile(a, [25, 75], axis=0), color=color, alpha=0.2)
+axes[0].axvline(per_t['주기(분)'].median(), color='k', ls=':', lw=0.8)
+axes[0].set_xlabel('시차 (분)'); axes[0].set_ylabel('자기상관')
+axes[0].set_title(f'몰드 레벨(5초): 주기 약 {per_t["주기(분)"].median():.0f}분으로 정상·열화가 같고, 폭만 커진다', fontsize=10)
+axes[0].legend(fontsize=9)
+for c, color, ls, name in [('LOAD', '#9e9e9e', '-', '부하 (운전 조건)'), ('WD-LOD', '#e07b39', '--', '인발 부하 원값 (부하와 겹침)'),
+                           ('WDL_C_D', '#2f5d8a', '-', '인발 부하 보정 변화량 (모델에 씀)')]:
+    axes[1].plot(range(37), ac_h[c], color=color, ls=ls, lw=2 if c == 'LOAD' else 1.5, marker='.', label=name)
+axes[1].axvline(lag_load, color='k', ls=':', lw=0.8)
+axes[1].axhline(0, color='k', lw=0.5)
+axes[1].set_xlabel('시차 (시간)'); axes[1].set_ylabel('자기상관 (정상 시나리오 중앙값)')
+axes[1].set_title(f'1시간 요약: 부하 주기 {lag_load}시간. 보정 뒤 부하와의 상관은 0이지만 주기 성분이 약하게 남는다', fontsize=10)
+axes[1].legend(fontsize=9)
+fig.tight_layout()
+save(fig, '20_eda_주기분석.png')
+
+# 12-2. 추세: 네 신호 평균 점수의 6시간 기울기 (같은 운전 구간 안, 기준 구간 제외)
+ts = hr[['SCENARIO_ID', 'SEG', 'SEG_HOUR', 'HOUR_START', 'HTF', 'FAILURE_DT', 'MODE']].copy()
+ts['SCORE'] = Z.mean(axis=1).where(hr['SEG_HOUR'] >= 2)
+ts[list(LBL.values())] = Z.rename(columns=LBL).where(hr['SEG_HOUR'] >= 2, np.nan).values
+grp = ts.groupby(['SCENARIO_ID', 'SEG'])
+ts['SLOPE6'] = (ts['SCORE'] - grp['SCORE'].shift(6)) / 6
+for c in LBL.values():
+    ts['VOL6_' + c] = grp[c].transform(lambda s: s.rolling(6, min_periods=6).std())
+gradual = fl.loc[fl['TYPE'] == '점진 고장', ['SCENARIO_ID', 'FAILURE_DT', 'DEG_START']]
+ts = ts.merge(gradual, on=['SCENARIO_ID', 'FAILURE_DT'], how='left')
+BINS = {'정상': None, '고장 전 36~24h': (-36, -24), '24~12h': (-24, -12), '12~0h': (-12, 0)}
+
+
+def bin_mask(b):
+    if b == '정상':
+        return ((ts['MODE'] == 'normal') & (ts['SEG_HOUR'] >= 2)).values
+    lo, hi = BINS[b]
+    return (ts['DEG_START'].notna() & (ts['HTF'] > lo) & (ts['HTF'] <= hi)).values
+
+
+trend = pd.DataFrame({b: {'기울기 중앙값 (점수/시간)': ts.loc[bin_mask(b), 'SLOPE6'].median(),
+                          '기울기 > 0 비율': (ts.loc[bin_mask(b), 'SLOPE6'].dropna() > 0).mean(),
+                          '평균 점수 중앙값': ts.loc[bin_mask(b), 'SCORE'].median()} for b in BINS}).T
+show(trend.round(3), '12-2. 추세: 고장에 가까울수록 점수가 빨리 오른다 (점진 고장)')
+
+# 12-3. 변동성: 신호별 6시간 이동표준편차
+VOLC = ['VOL6_' + c for c in LBL.values()]
+vol = pd.DataFrame({b: ts.loc[bin_mask(b), VOLC].median() for b in BINS}).T
+vol.columns = list(LBL.values())
+show(vol.round(3), '12-3. 변동성: 6시간 이동표준편차 중앙값 (표준화 점수 단위) → 열화가 진행될수록 흔들림도 커진다')
+
+# 12-4. 상태 변화 구간: 평균 점수의 누적합(CUSUM)으로 변화 시점을 찾고 진단상 열화 시작과 비교
+K = 0.5                                           # 찾으려는 변화(정상 0 → 경계 1)의 절반. 누적합의 표준 설정
+
+
+def cusum_first(g, h):
+    s, t_det = 0.0, None
+    for v, t in zip(g['SCORE'].values, g['HOUR_START'].values):
+        if np.isnan(v):
+            continue
+        s = max(0.0, s + v - K)
+        if s > h:
+            t_det = t
+            break
+    return t_det
+
+
+seg_n = [g for _, g in ts[(ts['MODE'] == 'normal')].groupby(['SCENARIO_ID', 'SEG'])]
+H_GRID = np.round(np.arange(0.1, 30.01, 0.1), 1)
+fa = {h: np.mean([any(cusum_first(g, h) is not None for g in seg_n if g['SCENARIO_ID'].iloc[0] == sid)
+                  for sid in {g['SCENARIO_ID'].iloc[0] for g in seg_n}]) for h in H_GRID}
+H_CUSUM = float(min(h for h in H_GRID if fa[h] <= 0.05))
+print(f'12-4. 누적합 기준: 점수가 {K}를 넘는 만큼 쌓아 {H_CUSUM}을 넘으면 변화 시작 '
+      f'(정상 시나리오 중 변화로 잡히는 비율 {fa[H_CUSUM]:.1%} ≤ 5%가 되는 가장 작은 값)')
+cp, cp_times = [], []
+for (sid, fdt), g in ts[ts['DEG_START'].notna() & ts['HTF'].notna()].groupby(['SCENARIO_ID', 'FAILURE_DT']):
+    t = cusum_first(g.sort_values('HOUR_START'), H_CUSUM)
+    d0 = g['DEG_START'].iloc[0]
+    if t is not None:
+        t = pd.Timestamp(t, tz='UTC') + pd.Timedelta(hours=1)      # 1시간 구간이 끝나야 알 수 있다
+    cp_times.append(t)
+    cp.append({'SCENARIO_ID': sid, '변화 감지': t is not None,
+               '열화 시작 → 변화 감지(h)': (t - d0).total_seconds() / 3600 if t is not None else np.nan,
+               '변화 감지 → 고장(h)': (fdt - t).total_seconds() / 3600 if t is not None else np.nan,
+               '열화 시작 → 고장(h)': (fdt - d0).total_seconds() / 3600})
+cp = pd.DataFrame(cp)
+# 변화 감지 시각에 진단상 열화(배경 마모 포함) 중이었나
+deg_any = diag_tr[diag_tr['HEALTH_STATE'] == 'degraded']
+def in_degraded(sid, t):
+    d = deg_any[deg_any['SCENARIO_ID'] == sid]
+    return bool(((d['START_AT'] <= t) & (d['END_AT'] > t)).any())
+cp['감지 때 열화 중'] = [t is not None and in_degraded(sid, t) for sid, t in zip(cp['SCENARIO_ID'], cp_times)]
+show(cp[['열화 시작 → 변화 감지(h)', '변화 감지 → 고장(h)', '열화 시작 → 고장(h)']].describe().loc[['count', 'min', '25%', '50%', '75%', 'max']].round(1),
+     f'12-4. 점진 고장 {len(cp)}건: 변화 감지 {int(cp["변화 감지"].sum())}건')
+print(f'  변화 감지가 고장 24시간 이상 전: {int((cp["변화 감지 → 고장(h)"] >= 24).sum())}건, '
+      f'열화 시작보다 먼저 감지: {int((cp["열화 시작 → 변화 감지(h)"] < 0).sum())}건 '
+      f'(그중 감지 때 다른 열화 구간 중: {int((cp["감지 때 열화 중"] & (cp["열화 시작 → 변화 감지(h)"] < 0)).sum())}건)')
+
+fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+order = list(BINS)
+axes[0, 0].boxplot([ts.loc[bin_mask(b), 'SLOPE6'].dropna() for b in order], showfliers=False)
+axes[0, 0].set_xticks(range(1, 5), order)
+axes[0, 0].axhline(0, color='k', lw=0.5)
+axes[0, 0].set_ylabel('평균 점수의 6시간 기울기 (점수/시간)')
+axes[0, 0].set_title('추세: 고장에 가까울수록 빨리 나빠진다')
+for c, color in zip(vol.columns, ['#2f5d8a', '#e07b39', '#4a9b5e', '#9b4a8a']):
+    axes[0, 1].plot(order, vol[c], marker='o', color=color, label=c.removesuffix('_D'))
+axes[0, 1].set_ylabel('6시간 이동표준편차 중앙값 (표준화 점수)')
+axes[0, 1].set_title('변동성: 열화가 진행될수록 흔들림도 커진다')
+axes[0, 1].legend(fontsize=8)
+axes[1, 0].hist(cp['열화 시작 → 변화 감지(h)'].dropna(), bins=np.arange(-16, 9, 2), color='#2f5d8a', edgecolor='white')
+axes[1, 0].axvline(0, color='k', lw=0.8)
+axes[1, 0].set_xlabel('진단상 열화 시작 → 누적합 변화 감지 (h, 음수 = 먼저 감지)')
+axes[1, 0].set_ylabel('점진 고장 수')
+md = cp['열화 시작 → 변화 감지(h)'].median()
+axes[1, 0].set_title(f'상태 변화 구간: 누적합 변화 감지는 진단상 열화 시작과 거의 같다 (중앙값 {abs(md):.1f}시간 {"먼저" if md < 0 else "뒤"})', fontsize=10)
+ex = cp.dropna().sort_values('열화 시작 → 고장(h)').iloc[len(cp.dropna()) // 2]['SCENARIO_ID']
+g = ts[(ts['SCENARIO_ID'] == ex) & ts['DEG_START'].notna() & ts['HTF'].notna()].sort_values('HOUR_START')
+s_acc, cs = 0.0, []
+for v in g['SCORE'].values:
+    s_acc = max(0.0, s_acc + (0 if np.isnan(v) else v - K))
+    cs.append(s_acc)
+ax = axes[1, 1]
+ax.plot(g['HTF'], g['SCORE'], color='k', label='네 신호 평균 점수')
+ax2 = ax.twinx()
+ax2.plot(g['HTF'], cs, color='#e07b39', label='누적합')
+ax2.axhline(H_CUSUM, color='#e07b39', ls='--', lw=0.8)
+d0 = (g['DEG_START'].iloc[0] - g['FAILURE_DT'].iloc[0]).total_seconds() / 3600
+ax.axvspan(d0, 0, color='#c9b8e8', alpha=0.4, lw=0)
+r = cp[cp['SCENARIO_ID'] == ex].iloc[0]
+ax.axvline(-r['변화 감지 → 고장(h)'], color='#e07b39', lw=1.5)
+ax.axhline(1, color='k', ls=':', lw=0.8)
+ax.set_xlabel('고장까지 남은 시간 (h) · 보라 띠: 진단상 열화 · 주황 세로선: 변화 감지')
+ax.set_ylabel('평균 점수'); ax2.set_ylabel('누적합')
+ax.set_title(f'예: {ex} (열화 시작 {r["열화 시작 → 변화 감지(h)"]:+.0f}h에 감지, 고장 {r["변화 감지 → 고장(h)"]:.0f}h 전)')
+fig.tight_layout()
+save(fig, '21_eda_추세_변동성_변화점.png')
 
 section('완료: 결론과 결정 사항은 reports/연주_조기경보_결과보고서.md 부록 A 참고')

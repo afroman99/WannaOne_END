@@ -10,27 +10,40 @@
 - 특징: 센서 특징만 / 센서 + 정비 이력을 비교한다. 경과 시간은 쓰지 않는다.
 - 기준 예제(02_baseline.py)도 같은 규칙으로 다시 평가해 공정하게 비교한다.
 - 대표 숫자는 이른 경보도 오경보로, 돌발 고장도 놓친 것으로 센다. 유리한 해석은 참고로 함께 출력한다.
+
+그림 (figures/, 저장소에는 올리지 않음)
+  12_model_교차검증_모델비교.png      모델·특징 묶음을 고른 근거 (학습 세트 교차검증 AP)
+  13_model_검증_정밀도재현율곡선.png  우리 모델과 기준 예제의 검증 세트 비교
+  14_model_임계값별_경보결과.png      임계값 0.76을 고른 근거 (학습 세트 교차검증)
+  15_model_검증_고장별_경보타임라인.png  검증 세트 고장마다 언제 경보가 났는지
 """
 
 import importlib.util
 import sys
 from pathlib import Path
 
+import matplotlib
+matplotlib.use('Agg')   # 화면 없이 그림 파일로만 저장
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import average_precision_score
+from sklearn.metrics import average_precision_score, precision_recall_curve
 from sklearn.pipeline import make_pipeline
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from src.evaluate import choose_threshold, evaluate, failure_events, print_report
+from src.evaluate import (attach_failure_info, choose_threshold, evaluate, event_and_cost, failure_events,
+                          point_metrics, print_report)
 from src.features import build_dataset
 from src.model import FEATURES, MODELS, oof_predict
+from src.plotting import save_figure, setup_korean_font
 from src.posko_data import load_scenarios
 
 PART_RULE = '두 부품'
+setup_korean_font()
+OURS, BASE = '#2f5d8a', '#9e9e9e'          # 그림 색: 우리 모델, 기준 예제
 
 
 def section(title):
@@ -142,3 +155,95 @@ summary['아무것도 안 함'] = pd.Series({f'비용 ({PART_RULE})': res['cost_
                                   '비용 (반반, 최악)': res['cost_reference']['아무것도 안 함'],
                                   '비용 (맞힘, 상한)': res['cost_reference']['아무것도 안 함']})
 print(summary.to_string())
+
+
+# 6. 근거 그림
+
+section('6. 근거 그림')
+
+# 12. 교차검증 모델 비교: 막대 = 교차검증 AP, 가로선 = 기준 예제
+fig, ax = plt.subplots(figsize=(8, 4))
+c = cv.reset_index()
+labels = [f'{m}\n{f}' for m, f in zip(c['모델'], c['특징'])]
+colors = [OURS if (m, f) == best else '#a9bfd6' for m, f in zip(c['모델'], c['특징'])]
+bars = ax.barh(labels, c['CV AP'], color=colors)
+ax.bar_label(bars, fmt='%.3f', padding=3, fontsize=9)
+ax.axvline(b_summ['CV AP'], color=BASE, ls='--', lw=1)
+ax.text(b_summ['CV AP'], len(c) - 0.4, f' 기준 예제 {b_summ["CV AP"]:.3f}', color='#616161', fontsize=9, va='bottom')
+ax.invert_yaxis()
+ax.set_xlim(0.5, 1.0)
+ax.set_xlabel('교차검증 AP (학습 세트, 시나리오 단위 5겹)')
+ax.set_title(f'모델·특징 묶음 비교 → 선택: {best_model} · {best_feat} (진한 막대)')
+save_figure(fig, '12_model_교차검증_모델비교.png')
+
+# 13. 검증 세트 정밀도-재현율 곡선과 실제로 쓰는 임계값의 위치
+fig, ax = plt.subplots(figsize=(6, 5))
+for name, y, p, t, r, color, offset in [
+        (f'우리 모델 (AP {res["point"]["AP"]:.3f})', valid['risk24'], p_val, th, res, OURS, (8, 8)),
+        (f'기준 예제 (AP {b_res["point"]["AP"]:.3f})', rec_va['risk24'], b_val, b_th, b_res, BASE, (-75, -20))]:
+    pr, rc, _ = precision_recall_curve(y, p)
+    ax.plot(rc, pr, color=color, label=name, lw=1.8)
+    ax.scatter(r['point']['재현율'], r['point']['정밀도'], color=color, s=60, zorder=3, edgecolor='k')
+    ax.annotate(f'임계값 {t:.2f}', (r['point']['재현율'], r['point']['정밀도']),
+                textcoords='offset points', xytext=offset, fontsize=9, color=color)
+ax.axhline(valid['risk24'].mean(), color='k', lw=0.5, ls=':')
+ax.text(0.55, valid['risk24'].mean() + 0.015, f'무작위로 경보할 때 ({valid["risk24"].mean():.2f})', fontsize=8)
+ax.set_xlim(0, 1.02); ax.set_ylim(0, 1.05)
+ax.set_xlabel('재현율 (24시간 안 고장 시점 중 경보 비율)')
+ax.set_ylabel('정밀도 (경보 중 실제 24시간 안 고장 비율)')
+ax.set_title('검증 세트 정밀도-재현율 (점: 실제 쓰는 임계값)')
+ax.legend(loc='lower left', bbox_to_anchor=(0, 0.15))
+save_figure(fig, '13_model_검증_정밀도재현율곡선.png')
+
+# 14. 임계값별 결과 (학습 세트 교차검증 예측): 임계값을 고른 곳과 같은 자료
+oof_best = oofs[best][0]
+d_tr = attach_failure_info(train, ev_train)
+rows = []
+for t in np.round(np.arange(0.50, 0.991, 0.01), 2):   # 0.5 아래는 오경보가 급격히 늘어 생략
+    summ, by_type, cost, _, _ = event_and_cost(d_tr, oof_best, t, ev_train)
+    pm = point_metrics(d_tr, oof_best, t)
+    g = by_type.loc['점진 고장']
+    rows.append({'t': t, '점진 고장 놓침': int(g['고장'] - g['감지']), '진짜 오경보': summ['고장과 무관한 경보 묶음: 오경보'],
+                 '리드타임': summ['리드타임 중앙값(h)'], '비용': cost[PART_RULE], '정밀도': pm['정밀도'], '재현율': pm['재현율']})
+sweep = pd.DataFrame(rows)
+th_cost = choose_threshold(train, oof_best, criterion='cost', events=ev_train)
+fig, axes = plt.subplots(3, 1, figsize=(8, 8), sharex=True)
+axes[0].plot(sweep['t'], sweep['점진 고장 놓침'], color='#eb5757', label='놓친 점진 고장 (건)', marker='.')
+axes[0].plot(sweep['t'], sweep['진짜 오경보'], color='#f2994a', label='진짜 오경보 (경보 묶음)', marker='.')
+axes[0].set_ylabel('건수'); axes[0].legend(fontsize=9)
+axes[1].plot(sweep['t'], sweep['리드타임'], color=OURS, marker='.')
+axes[1].axhline(24, color='k', lw=0.5, ls=':')
+axes[1].set_ylabel('리드타임 중앙값 (h)')
+axes[2].plot(sweep['t'], sweep['비용'], color='#4a9b5e', marker='.')
+axes[2].set_ylabel(f'비용 ({PART_RULE}, 점수)')
+axes[2].set_xlabel('임계값')
+for ax in axes:
+    ax.axvline(th, color=OURS, lw=1.2)
+    ax.axvline(th_cost, color=BASE, lw=1, ls='--')
+axes[0].set_title(f'임계값별 결과 (학습 세트 교차검증)\n실선: 선택 {th:.2f} (점진 고장 모두 감지 + 진짜 오경보 0 중 가장 낮은 값)'
+                  f' · 점선: 비용 최소 {th_cost:.2f}', fontsize=10)
+save_figure(fig, '14_model_임계값별_경보결과.png')
+
+# 15. 검증 세트 고장마다 예측 시점별 경보 (가로축: 고장까지 남은 시간)
+d_va = attach_failure_info(valid, ev_valid).assign(PROB=p_val, ALARM=p_val >= th)
+ev_plot = res['events'].copy()
+ev_plot['ORDER'] = ev_plot['TYPE'].map({'점진 고장': 0, '돌발 고장': 1})
+ev_plot = ev_plot.sort_values(['ORDER', '리드타임(h)'], ascending=[True, False]).reset_index(drop=True)
+fig, ax = plt.subplots(figsize=(9, 0.42 * len(ev_plot) + 1.5))
+for i, e in ev_plot.iterrows():
+    g = d_va[d_va['FAIL_WO'] == e['WO_NO']]
+    ax.plot([-g['HTF'].max(), 0], [i, i], color='#e0e0e0', lw=1, zorder=1)
+    ax.scatter(-g.loc[~g['ALARM'], 'HTF'], [i] * (~g['ALARM']).sum(), facecolor='white', edgecolor='#757575', s=40, zorder=2)
+    ax.scatter(-g.loc[g['ALARM'], 'HTF'], [i] * g['ALARM'].sum(), color='#eb5757', s=40, zorder=3)
+    ax.scatter(0, i, marker='x', color='k', s=40, zorder=3)
+lab = [f'{e.SCENARIO_ID} ({e.TYPE})' for e in ev_plot.itertuples()]
+ax.set_yticks(range(len(ev_plot))); ax.set_yticklabels(lab, fontsize=9)
+ax.invert_yaxis()
+ax.axvspan(-24, 0, color='#fde9e9', zorder=0)
+ax.axvline(-4, color='k', lw=0.6, ls=':')
+ax.set_xlabel('고장까지 남은 시간 (h)  · 분홍 구간: 정답 1(24시간 안 고장) · 점선: 교체에 필요한 4시간 · ×: 고장')
+ax.scatter([], [], color='#eb5757', label=f'경보 (확률 ≥ {th:.2f})')
+ax.scatter([], [], facecolor='white', edgecolor='#757575', label='경보 없음')
+ax.legend(loc='lower left', fontsize=9)
+ax.set_title(f'검증 세트 고장 {len(ev_plot)}건의 예측 시점별 경보 (같은 운전 구간 안 예측 시점만)')
+save_figure(fig, '15_model_검증_고장별_경보타임라인.png')

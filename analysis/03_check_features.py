@@ -31,11 +31,11 @@ from sklearn.metrics import roc_auc_score
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from src.features import FEATURE_SETS, build_dataset, make_features
+from src.plotting import save_figure, setup_korean_font
 from src.posko_data import load_answer, load_scenarios, load_source
 from src.preprocess import EQP, RAW_COLS, SIGNALS, apply_params, hourly_summary
 
-plt.rcParams['font.family'] = 'AppleGothic'
-plt.rcParams['axes.unicode_minus'] = False
+setup_korean_font()
 
 results = []
 
@@ -228,10 +228,8 @@ axes[0].legend(ncol=3, fontsize=8)
 axes[0].set_title('고장 시나리오의 예측 시점별 점수 (빨강 띠: 고장 후 복구, 회색 띠: 그 밖의 정비, ▲: 정답 1)')
 axes[-1].set_xlabel('경과 시간(h)')
 fig.tight_layout()
-(ROOT / 'figures').mkdir(exist_ok=True)
-fig.savefig(ROOT / 'figures' / '11_check_고장시나리오_점수흐름.png', dpi=120, bbox_inches='tight')
-plt.close(fig)
-print('  → 그림 저장: figures/11_check_고장시나리오_점수흐름.png (점수가 고장 전에 오르고 정비 뒤 떨어지는지 눈으로 확인)')
+save_figure(fig, '11_check_고장시나리오_점수흐름.png')
+print('    (점수가 고장 전에 오르고 정비 뒤 떨어지는지 눈으로 확인)')
 
 
 # 7. 분포: 정상 시나리오에서 학습 vs 검증

@@ -32,12 +32,12 @@ python analysis/05_predict_test.py
 | `01_eda.py` | EDA 1~11절 재계산, 그림 10장 저장 | 약 20초 |
 | `02_baseline.py` | 데이터셋 기준 예제 재현과 오류 분석 | 약 20초 |
 | `03_check_features.py` | 전처리·특징 점검 21개 항목 (`--quick`이면 누설 검사를 표본 100개로) | 약 3분 (`--quick` 20초) |
-| `04_model.py` | **메인**: 학습 세트 교차검증으로 모델·임계값 선택, 검증 세트 한 번 평가 | 약 45초 |
+| `04_model.py` | **메인**: 학습 세트 교차검증으로 모델·임계값 선택, 검증 세트 한 번 평가, 근거 그림 4장 | 약 1분 |
 | `05_predict_test.py` | 검증한 모델로 테스트 세트 예측 → `predictions/test_risk24.csv` | 약 15초 |
 
 - 필요한 패키지: pandas, numpy, pyarrow, matplotlib, scikit-learn (Python 3.14, pandas 3.0, scikit-learn 1.9에서 확인)
 - 프로젝트 루트에서 실행한다. 그림은 `figures/`에 저장된다(저장소에는 올리지 않음).
-- 그래프 한글 글꼴로 macOS 기본 글꼴(AppleGothic)을 쓴다.
+- 그래프 한글 글꼴은 `src/plotting.py`가 설치된 글꼴에서 고른다(macOS AppleGothic → Windows 맑은 고딕 → 나눔고딕). 셋 다 없으면 경고가 나오니 나눔고딕을 설치한다. 그림 파일 이름은 Windows에서도 한글이 깨지지 않게 NFC로 저장한다.
 - 전처리 코드를 고치면 `03_check_features.py`를 다시 실행해 모두 통과하는지 확인한다.
 
 ## 데이터 출처
@@ -76,6 +76,7 @@ src/
   features.py        예측 시점(6시간마다)까지의 정보만으로 특징 계산, 정답 (build_dataset, FEATURE_SETS)
   evaluate.py        시점 단위 혼동행렬, 고장 단위 감지·리드타임, 비용, 임계값 선택
   model.py           비교하는 모델·특징 묶음 정의, 최종 조합(FINAL), 시나리오 단위 교차검증
+  plotting.py        한글 글꼴 설정(macOS·Windows·Linux), 그림 저장
 analysis/
   01_eda.py          EDA: 데이터 품질, 열화 신호, 조기경보 한계, 운전조건, 센서 간 관계, 원인 구분, 정비 효과
   02_baseline.py     기준 예제(데이터셋 toolkit의 연주 예제) 재현과 오류 분석
@@ -84,7 +85,7 @@ analysis/
   05_predict_test.py 테스트 세트 예측 (예측 시점은 6시간마다, 정비 중인 시점 제외)
 data/posko/          변환된 데이터 (커밋하지 않음)
 predictions/         테스트 세트 예측 CSV (커밋하지 않음)
-figures/             번호_내용.png (커밋하지 않음)
+figures/             번호_내용.png (커밋하지 않음, 01~10 EDA · 11 점검 · 12~15 모델)
 reports/             문제정의서·결과보고서·발표자료
 ```
 

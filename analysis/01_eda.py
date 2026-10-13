@@ -35,12 +35,10 @@ from sklearn.preprocessing import StandardScaler
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+from src.plotting import save_figure, setup_korean_font
 from src.posko_data import load_answer, load_scenarios, load_source
 
-FIG_DIR = ROOT / 'figures'
-FIG_DIR.mkdir(exist_ok=True)
-plt.rcParams['font.family'] = 'AppleGothic'   # macOS 한글 글꼴
-plt.rcParams['axes.unicode_minus'] = False
+setup_korean_font()   # macOS·Windows·Linux 한글 글꼴 (src/plotting.py)
 pd.set_option('display.width', 200)
 pd.set_option('display.max_columns', 30)
 pd.set_option('display.max_colwidth', 120)
@@ -63,10 +61,7 @@ def show(df, title=None):
 
 
 def save(fig, name):
-    path = FIG_DIR / name
-    fig.savefig(path, dpi=120, bbox_inches='tight')
-    plt.close(fig)
-    print(f'  → 그림 저장: figures/{name}')
+    save_figure(fig, name)
 
 
 def runs(mask, keys):

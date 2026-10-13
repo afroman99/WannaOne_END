@@ -1,6 +1,6 @@
 """연주 조기경보 평가: 시점 단위 혼동행렬, 고장 단위 감지, 비용.
 
-팀 결정(reports/연주_조기경보_모델_결과.md 3-4절의 A~G)에 따른 대표 숫자와 함께, 다른 선택지의 숫자도 모두 계산한다.
+팀 결정(reports/연주_조기경보_결과보고서.md 2-1절의 A~G, 근거는 부록 B-4)에 따른 대표 숫자와 함께, 다른 선택지의 숫자도 모두 계산한다.
 
     from src.evaluate import evaluate, print_report, choose_threshold
 

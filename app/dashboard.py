@@ -343,7 +343,7 @@ elif page == '모델 정보':
     st.dataframe(ev[['시나리오', '고장 종류', '감지', '리드타임(h)']].sort_values(['고장 종류', '리드타임(h)'], ascending=[True, False]),
                  hide_index=True, column_config={'리드타임(h)': st.column_config.NumberColumn(format='%.1f')})
     st.caption('리드타임: 고장 4시간 전까지 난 경보 중 가장 이른 경보부터 고장까지의 시간. '
-               '자세한 근거는 reports/연주_조기경보_모델_결과.md')
+               '자세한 근거는 reports/연주_조기경보_결과보고서.md 4절과 부록 B')
 
 
 # 4. 비용 계산기

@@ -21,7 +21,7 @@ from src.features import FEATURE_SETS
 N_FOLDS = 5
 SEED = 31
 
-# 비교하는 특징 묶음. 경과 시간(FEATURE_SETS['elapsed'])은 쓰지 않는다(잠정 결정 E)
+# 비교하는 특징 묶음. 경과 시간(FEATURE_SETS['elapsed'])은 쓰지 않는다(팀 결정 E)
 FEATURES = {
     '센서': FEATURE_SETS['sensor'],
     '센서 + 정비 이력': FEATURE_SETS['sensor'] + FEATURE_SETS['maintenance'],

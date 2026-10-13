@@ -1,10 +1,10 @@
 """연주 조기경보 평가: 시점 단위 혼동행렬, 고장 단위 감지, 비용.
 
-평가 결정(reports/연주_조기경보_모델_결과.md 3절의 A~G)은 A~D가 확정이고 E~G는 잠정이라, 선택지를 모두 함께 계산한다.
+팀 결정(reports/연주_조기경보_모델_결과.md 3-4절의 A~G)에 따른 대표 숫자와 함께, 다른 선택지의 숫자도 모두 계산한다.
 
     from src.evaluate import evaluate, print_report, choose_threshold
 
-    th = choose_threshold(train_df, train_oof_prob)                  # 잠정 결정: 점진 고장 모두 감지 + 진짜 오경보 0 중 가장 낮은 임계값
+    th = choose_threshold(train_df, train_oof_prob)                  # 팀 결정 D: 점진 고장 모두 감지 + 진짜 오경보 0 중 가장 낮은 임계값
     res = evaluate(valid_df, valid_prob, th)
     print_report(res)
 
@@ -195,7 +195,7 @@ def choose_threshold(df, prob, criterion='earliest', part_rule='두 부품', all
     """임계값을 고른다 (논의 항목 D). 학습 세트의 교차검증 예측에서 고르고 검증 세트에 그대로 쓴다.
 
     criterion
-      'earliest' (잠정 결정) 점진 고장을 모두 잡고 진짜 오경보(고장 예정이 없는 경보 묶음)가 0인 임계값 중 가장 낮은 것.
+      'earliest' (팀 결정 D) 점진 고장을 모두 잡고 진짜 오경보(고장 예정이 없는 경보 묶음)가 0인 임계값 중 가장 낮은 것.
                  오경보 없이 가장 일찍 경보한다. 그런 임계값이 없으면 진짜 오경보가 가장 적은 것 중 가장 낮은 것
       'cost'     part_rule 가정의 비용 최소 (같으면 높은 임계값). 비용 규칙은 교체할 4시간만 있으면
                  막았다고 보므로 리드타임을 반영하지 못해 늦은 경보를 고르는 경향이 있다(참고용)

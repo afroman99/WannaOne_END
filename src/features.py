@@ -23,7 +23,7 @@ import pandas as pd
 from src.posko_data import load_answer, load_scenarios, load_source
 from src.preprocess import EQP, SIGNALS
 
-# 특징 묶음. 'sensor'가 기본이고, 팀 논의가 남은 특징(정비 이력, 경과 시간)은 따로 둔다
+# 특징 묶음. 'sensor'가 기본이다. 정비 이력은 쓰고(팀 결정 F), 경과 시간은 비교용으로만 둔다(팀 결정 E)
 _SIG_FEATS = [f'{s}_{k}' for s in SIGNALS for k in ['D', 'D_MEAN3', 'D_SLOPE6', 'F']]
 FEATURE_SETS = {
     'sensor': _SIG_FEATS + [
@@ -31,8 +31,8 @@ FEATURE_SETS = {
         'PERSIST_H',                                                    # 평균 점수가 1을 넘은 연속 시간 (EDA 7-3)
         'SEG_HOURS', 'GAP_H',                                           # 재가동 후 시간, 마지막 운전 구간 이후 공백
     ],
-    'maintenance': ['N_MNT', 'H_SINCE_MNT', 'LAST_PARTIAL', 'LAST_REPAIR', 'LAST_REPLACE'],   # [미정] 정비 이력
-    'elapsed': ['ELAPSED_H'],                                                                 # [미정] 경과 시간
+    'maintenance': ['N_MNT', 'H_SINCE_MNT', 'LAST_PARTIAL', 'LAST_REPAIR', 'LAST_REPLACE'],   # 정비 이력 (팀 결정 F: 사용)
+    'elapsed': ['ELAPSED_H'],                                                                 # 경과 시간 (팀 결정 E: 사용 안 함)
 }
 
 

@@ -16,6 +16,8 @@ prob은 df와 같은 순서의 24시간 고장 확률(또는 점수)이다. 경�
 - 돌발 고장: 진단 정답에 고장 직전 열화 구간이 없는 고장 (EDA 7-1). 센서 신호가 없어 미리 잡기 어렵다
 - 고장 단위 감지: 고장 전 같은 운전 구간 안에서, 고장 min_lead시간(교체 4시간) 이전에 경보가 한 번이라도 났는지
 - 비용: 데이터셋 비용 규칙(toolkit/targets.md). 경보가 나면 바로 교체한다고 가정한다
+  evaluate의 비용은 정답을 알 수 있는 시점만으로 계산한 '평가 가능 구간 비용'이다.
+  정답을 알 수 없는 시점의 경보는 unlabeled_alarms로 따로 세어 운영 비용에 범위로 더한다
 """
 
 import numpy as np
@@ -177,7 +179,42 @@ def event_and_cost(d, prob, th, events):
     return summary, by_type, cost, refs, ev
 
 
-# 4. 한 번에 평가하기
+# 4. 정답을 알 수 없는 시점의 경보 (운영 비용)
+
+def unlabeled_alarms(all_pts, prob, th, labeled):
+    """정답을 알 수 없어 평가에서 빠진 예측 시점의 경보를 센다.
+
+    관측이 끝나 24시간 결과를 알 수 없는 시점(주로 관측 끝 48시간 이후)은 분류 평가에서 뺀다.
+    하지만 실제 운영에서는 그 시점에도 경보가 울리고 교체가 일어나므로, 운영 비용에는 들어가야 한다.
+    맞은 경보인지 오경보인지는 알 수 없으므로 경보 묶음마다 비용을 범위로 낸다
+    (필요한 교체였다면 needed, 불필요했다면 false 비용).
+
+    all_pts  예측 시점 전체 (SCENARIO_ID, OBSERVED_AT). prob과 같은 순서
+    labeled  평가에 쓴 예측 시점 표 (SCENARIO_ID, OBSERVED_AT)
+    반환     {'시점', '경보 시점', '경보 묶음', '비용 범위': {부품 가정: (최소, 최대)}, '목록': 경보 시점 표}
+             경보 묶음은 같은 시나리오에서 6시간 간격으로 이어진 경보다. 평가된 경보와 이어진 묶음은
+             이미 평가 비용에 들어 있으므로 세지 않는다.
+    """
+    d = all_pts[['SCENARIO_ID', 'OBSERVED_AT']].copy()
+    d['ALARM'] = np.asarray(prob, dtype=float) >= th
+    keys = set(zip(labeled['SCENARIO_ID'], labeled['OBSERVED_AT']))
+    d['LABELED'] = [k in keys for k in zip(d['SCENARIO_ID'], d['OBSERVED_AT'])]
+    d = d.sort_values(['SCENARIO_ID', 'OBSERVED_AT'])
+    new = d['ALARM'] & ~(d.groupby('SCENARIO_ID')['ALARM'].shift(fill_value=False))
+    d['EP'] = new.cumsum().where(d['ALARM'])
+    ep = d[d['ALARM']].groupby('EP')['LABELED'].any()
+    only = ep[~ep].index
+    n = len(only)
+    return {
+        '시점': int((~d['LABELED']).sum()),
+        '경보 시점': int((d['ALARM'] & ~d['LABELED']).sum()),
+        '경보 묶음': n,
+        '비용 범위': {rule: (n * c['needed'], n * c['false']) for rule, c in PART_RULES.items()},
+        '목록': d[d['EP'].isin(only)][['SCENARIO_ID', 'OBSERVED_AT']].reset_index(drop=True),
+    }
+
+
+# 5. 한 번에 평가하기
 
 def evaluate(df, prob, th, events=None):
     """시점 단위·고장 단위·비용을 함께 계산한다. events를 주지 않으면 df의 시나리오로 만든다."""

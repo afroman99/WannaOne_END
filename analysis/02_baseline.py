@@ -48,8 +48,11 @@ def load_observations(scen):
     return obs.sort_values(['SCENARIO_ID', 'h'], ignore_index=True)
 
 
-def load_targets(scen):
-    """예측 시점별 정답. 예제와 같은 규칙으로 24시간 위험(risk24)을 만든다."""
+def load_targets(scen, keep_unlabeled=False):
+    """예측 시점별 정답. 예제와 같은 규칙으로 24시간 위험(risk24)을 만든다.
+
+    keep_unlabeled=True면 정답을 알 수 없는 시점(risk24 = -1)도 남긴다 (운영 비용의 미확정 경보를 셀 때)
+    """
     tg = load_answer('targets').query('EQP_CD == @EQP')
     tg = tg.merge(scen[['SCENARIO_ID', 'START_AT', 'SPLIT']], on='SCENARIO_ID')
     tg['h'] = (tg['OBSERVED_AT'] - tg['START_AT']).dt.total_seconds() / 3600
@@ -60,7 +63,7 @@ def load_targets(scen):
     tg['risk24'] = np.select([event & (tg['FOLLOWUP_HOURS'] <= 24), event,
                               ~event & (tg['FOLLOWUP_HOURS'] >= 24)],
                              [1, 0, 0], default=-1)
-    return tg[tg['risk24'] >= 0]   # 관측 종료로 24시간 결과를 모르는 시점은 뺀다
+    return tg if keep_unlabeled else tg[tg['risk24'] >= 0]   # 관측 종료로 24시간 결과를 모르는 시점은 뺀다
 
 
 # 2. 특징 만들기: 예측 시점까지의 최근 12시간만 쓴다

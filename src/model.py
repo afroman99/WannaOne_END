@@ -2,7 +2,7 @@
 
 analysis/04_model.py(모델 선택·검증 평가)와 analysis/05_predict_test.py(테스트 세트 예측)가 같은 정의를 쓴다.
 
-    from src.model import MODELS, FEATURES, FINAL, oof_predict
+    from src.model import MODELS, FEATURES, FINAL, fold_features, oof_from_folds
 
     make = MODELS[FINAL['model']]
     cols = FEATURES[FINAL['features']]
@@ -21,7 +21,7 @@ from src.features import FEATURE_SETS
 N_FOLDS = 5
 SEED = 31
 
-# 비교하는 특징 묶음. 경과 시간(FEATURE_SETS['elapsed'])은 쓰지 않는다(팀 결정 E)
+# 비교하는 특징 묶음. 시간을 세는 특징(FEATURE_SETS['elapsed']: 경과 시간, 재가동 후 시간)은 쓰지 않는다(팀 결정 E)
 FEATURES = {
     '센서': FEATURE_SETS['sensor'],
     '센서 + 정비 이력': FEATURE_SETS['sensor'] + FEATURE_SETS['maintenance'],
@@ -40,13 +40,50 @@ MODELS = {
 }
 
 # 04_model.py에서 학습 세트 교차검증 AP로 고르고 검증 세트에서 평가한 최종 조합 (2026-10-13)
-FINAL = {'model': '로지스틱 회귀', 'features': '센서 + 정비 이력'}
+FINAL = {'model': '랜덤포레스트', 'features': '센서 + 정비 이력'}
 
 
 def oof_predict(make_model, X, y, groups, n_folds=N_FOLDS):
-    """시나리오 단위 n겹 교차검증의 겹 밖 예측 확률 (같은 시나리오는 한 겹에만 들어간다)"""
+    """시나리오 단위 n겹 교차검증의 겹 밖 예측 확률 (같은 시나리오는 한 겹에만 들어간다).
+
+    보정값이 필요 없는 특징(기준 예제)에 쓴다. 우리 특징은 보정값을 폴드마다 다시 정해야 하므로
+    fold_features + oof_from_folds를 쓴다.
+    """
     oof = np.zeros(len(y))
     for tr_idx, te_idx in GroupKFold(n_splits=n_folds).split(X, y, groups):
+        m = make_model().fit(X[tr_idx], y[tr_idx])
+        oof[te_idx] = m.predict_proba(X[te_idx])[:, 1]
+    return oof
+
+
+def fold_features(hr, train, n_folds=N_FOLDS):
+    """교차검증 폴드마다 그 폴드의 학습 부분만으로 보정값을 다시 정해 특징을 계산한다.
+
+    보정값(부하 기울기·절편, 표준화 기준)과 그 기준이 되는 정상 시나리오 선택(진단 정답 사용)에
+    평가 폴드의 정보가 섞이지 않게 하려는 것이다.
+
+    hr     preprocess.build_hourly 결과(또는 apply_params 결과. 보정 열은 다시 계산된다)
+    train  학습 세트의 예측 시점 표 (build_dataset 결과에서 SPLIT == 'train', 인덱스 0..n-1)
+    반환   [(tr_idx, te_idx, 특징 표), ...] 폴드 수만큼. 특징 표는 train과 같은 행 순서
+    """
+    from src.features import TARGET_COLS, make_features, normal_scenarios
+    from src.preprocess import apply_params, fit_params
+
+    ids = train['SCENARIO_ID'].unique().tolist()
+    h_train = hr[hr['SCENARIO_ID'].isin(ids)]
+    folds = []
+    for tr_idx, te_idx in GroupKFold(n_splits=n_folds).split(train, groups=train['SCENARIO_ID']):
+        fit_ids = train['SCENARIO_ID'].iloc[tr_idx].unique().tolist()
+        params = fit_params(h_train[h_train['SCENARIO_ID'].isin(fit_ids)], normal_scenarios(fit_ids))
+        folds.append((tr_idx, te_idx, make_features(apply_params(h_train, params), train[TARGET_COLS])))
+    return folds
+
+
+def oof_from_folds(make_model, cols, y, folds):
+    """fold_features 결과로 겹 밖 예측 확률을 만든다 (모델·특징 묶음을 바꿔도 폴드 특징은 다시 계산하지 않는다)"""
+    oof = np.zeros(len(y))
+    for tr_idx, te_idx, F in folds:
+        X = F[cols].values.astype(float)
         m = make_model().fit(X[tr_idx], y[tr_idx])
         oof[te_idx] = m.predict_proba(X[te_idx])[:, 1]
     return oof

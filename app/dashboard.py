@@ -77,19 +77,29 @@ st.sidebar.caption(f'모델: {bundle["final"]["model"]} · {bundle["final"]["fea
 pts, hr, contrib, mnt = get_data(split)
 pts_now = pts[pts['T_H'] <= now]
 hr_now = hr[hr['DONE_H'] <= now]
-mnt_now = mnt[mnt['START_H'] <= now].assign(END_SHOWN=lambda d: d['END_H'].clip(upper=now))
+mnt_now = mnt[mnt['START_H'] <= now].assign(
+    END_SHOWN=lambda d: d['END_H'].clip(upper=now),
+    시작=lambda d: d['START_H'].map(lambda x: f'{x:.1f}h'),
+    종료=lambda d: d['END_H'].map(lambda x: f'{x:.1f}h' if x <= now else '진행 중 (종료 미확정)'))   # 미래의 종료 시각은 보여 주지 않는다
+last_mnt_start = mnt_now.groupby('SCENARIO_ID')['START_H'].max()     # 지금까지 마지막으로 시작된 정비
+
+
+def after_last_maintenance(df, time_col):
+    """마지막 정비가 시작된 뒤의 행만 남긴다. 정비 전 값은 지금 상태가 아니기 때문이다."""
+    start = df['SCENARIO_ID'].map(last_mnt_start).fillna(-np.inf)
+    return df[df[time_col] >= start]
 
 
 def status_table():
     """시나리오마다 지금 시각 기준 상태 한 줄"""
     last = pts_now.sort_values('T_H').groupby('SCENARIO_ID').tail(1).set_index('SCENARIO_ID')
     first_alarm = pts_now[pts_now['ALARM']].groupby('SCENARIO_ID')['T_H'].min()
-    last_hr = hr_now.dropna(subset=list(SIGNAL_NAMES)).sort_values('DONE_H').groupby('SCENARIO_ID').tail(1)
+    cur = after_last_maintenance(hr_now.assign(HOUR_START=hr_now['DONE_H'] - 1), 'HOUR_START')
+    last_hr = cur.dropna(subset=list(SIGNAL_NAMES)).sort_values('DONE_H').groupby('SCENARIO_ID').tail(1)
     worst = last_hr.set_index('SCENARIO_ID')[list(SIGNAL_NAMES)].idxmax(axis=1).map(SIGNAL_NAMES)
     in_mnt = set(mnt[(mnt['START_H'] <= now) & (mnt['END_H'] > now)]['SCENARIO_ID'])
     # 마지막 예측 뒤에 정비가 시작됐으면 그 예측은 정비 전 상태라 쓰지 않는다
-    last_mnt = mnt_now.groupby('SCENARIO_ID')['START_H'].max()
-    stale = set(last_mnt[last_mnt > last['T_H'].reindex(last_mnt.index).fillna(-1)].index) - in_mnt
+    stale = set(last_mnt_start[last_mnt_start > last['T_H'].reindex(last_mnt_start.index).fillna(-1)].index) - in_mnt
     t = pd.DataFrame({'설비 (시나리오)': sorted(pts['SCENARIO_ID'].unique())}).set_index('설비 (시나리오)', drop=False)
     t['위험 확률'] = last['PROB']
     t['마지막 예측 (h)'] = last['T_H']
@@ -110,7 +120,7 @@ def mnt_layer(sid, y_field_max):
     """정비 기간(회색 띠)과 고장 시각(빨간 선)"""
     m = mnt_now[mnt_now['SCENARIO_ID'] == sid]
     band = alt.Chart(m).mark_rect(color=MNT_GRAY, opacity=0.35).encode(
-        x='START_H:Q', x2='END_SHOWN:Q', tooltip=['종류', 'PART_CD', 'START_H', 'END_H'])
+        x='START_H:Q', x2='END_SHOWN:Q', tooltip=['종류', 'PART_CD', '시작', '종료'])
     f = m.dropna(subset=['FAIL_H'])
     fail = alt.Chart(f).mark_rule(color=ALARM_RED, strokeWidth=2).encode(x='FAIL_H:Q', tooltip=['종류', 'FAIL_H'])
     layers = [band, fail]
@@ -202,9 +212,13 @@ elif page == '설비 상세':
     left, right = st.columns(2)
     with left:
         st.subheader('지금 신호 상태')
-        last = h.dropna(subset=list(SIGNAL_NAMES.values())).tail(1)
-        if last.empty:
-            st.write('아직 계산된 신호가 없습니다 (시작 직후 또는 정비 직후).')
+        cur = after_last_maintenance(h.assign(HOUR_START=h['DONE_H'] - 1), 'HOUR_START')
+        last = cur.dropna(subset=list(SIGNAL_NAMES.values())).tail(1)
+        if row['상태'] == '정비 중':
+            st.write('정비 중이라 신호가 없습니다.')
+        elif last.empty:
+            st.write('재가동 뒤 아직 계산된 신호가 없습니다. 재가동 후 처음 2시간은 기준을 잡는 시간입니다. '
+                     '(정비 전 신호는 지금 상태가 아니라서 보여 주지 않습니다.)')
         else:
             bar = last.melt(value_vars=list(SIGNAL_NAMES.values()), var_name='신호', value_name='점수')
             bar['정상 범위'] = np.where(bar['점수'] > 1, '벗어남', '안')
@@ -218,9 +232,12 @@ elif page == '설비 상세':
             st.caption(f'{last["DONE_H"].iloc[0]:.0f}시간까지의 1시간 값. 1을 넘으면 정상 시나리오의 95%보다 많이 벗어난 것입니다.')
     with right:
         with st.expander('자세히: 모델이 본 이유 (기여도)'):
-            cp = pts_now[pts_now['SCENARIO_ID'] == sid]
-            if cp.empty:
-                st.write('아직 예측이 없습니다.')
+            cp = after_last_maintenance(pts_now[pts_now['SCENARIO_ID'] == sid], 'T_H')
+            if contrib is None:
+                st.write(f'최종 모델({bundle["final"]["model"]})은 나무 여러 개의 투표로 확률을 내서, '
+                         '특징별 기여도를 바로 계산할 수 없습니다. 왼쪽의 신호 상태와 위의 신호 흐름으로 경보 이유를 확인하세요.')
+            elif cp.empty:
+                st.write('아직 예측이 없습니다. 정비가 시작되면 정비 전 예측은 쓰지 않고, 재가동 뒤 다음 예측 시점(6시간마다)을 기다립니다.')
             else:
                 cr = contrib.loc[cp.index[-1]].rename('기여도').reset_index().rename(columns={'index': '묶음'})
                 st.altair_chart(alt.Chart(cr).mark_bar().encode(
@@ -250,9 +267,10 @@ elif page == '모델 정보':
     c3.metric('고장 감지', f'{v["event"]["감지"]}/{v["event"]["고장"]}', help='돌발 고장 2건은 신호가 없어 못 잡음')
     c4.metric('리드타임 중앙값', f'{v["event"]["리드타임 중앙값(h)"]:.0f}시간')
     st.markdown(
-        f'- 오경보 {v["point"]["FP"]}개는 모두 고장 24시간보다 이른 **이른 경보**이고, 고장 예정이 없는데 울린 진짜 오경보는 '
-        f'{v["point"]["FP 중 진짜 오경보"]}개입니다.\n'
-        f'- 놓친 시점 {v["point"]["FN"]}개 중 {v["point"]["FN 중 돌발 고장"]}개는 신호 없이 갑자기 고장 난 돌발 고장입니다.')
+        f'- 오경보 {v["point"]["FP"]}개 중 {v["point"]["FP 중 이른 경보"]}개는 고장 24시간보다 일찍 울린 **이른 경보**이고, '
+        f'고장 예정이 없는데 울린 진짜 오경보는 {v["point"]["FP 중 진짜 오경보"]}개입니다.\n'
+        f'- 놓친 시점 {v["point"]["FN"]}개 중 {v["point"]["FN 중 돌발 고장"]}개는 신호 없이 갑자기 고장 난 돌발 고장입니다.\n'
+        '- 위 숫자는 정답을 알 수 있는 시점만으로 셌습니다. 관측 끝부분의 미확정 경보는 비용 계산기 화면에 있습니다.')
     st.subheader('검증 세트 고장별 결과')
     ev = v['events'].rename(columns={'SCENARIO_ID': '시나리오', 'TYPE': '고장 종류'})
     st.dataframe(ev[['시나리오', '고장 종류', '감지', '리드타임(h)']].sort_values(['고장 종류', '리드타임(h)'], ascending=[True, False]),
@@ -282,6 +300,14 @@ else:
     c1.metric('한 부품만 교체', f'{one:.0f}점', f'{one - none:+.0f} (아무것도 안 함 대비)', delta_color='inverse')
     c2.metric('두 부품 모두 교체', f'{both:.0f}점', f'{both - none:+.0f}', delta_color='inverse')
     c3.metric('아무것도 안 함', f'{none:.0f}점')
+    u = bundle['validation'].get('unlabeled')
+    if u:
+        lo, hi = u['비용 범위']['두 부품']
+        st.warning(
+            f'**위 비용은 정답을 알 수 있는 구간만 센 값입니다.** 관측이 끝나 결과를 알 수 없는 시점 {u["시점"]}개에서도 '
+            f'경보가 {u["경보 시점"]}번(경보 묶음 {u["경보 묶음"]}개) 울렸고, 실제 운영이라면 교체가 일어납니다. '
+            f'두 부품 교체 기준으로 {lo:.0f}~{hi:.0f}점이 더 들 수 있습니다. 이 경보가 관측 뒤의 고장을 막았는지, '
+            '"아무것도 안 함"에서 관측 뒤에 고장이 났는지는 알 수 없어 운영 비용은 확정할 수 없습니다.')
     even = cc.loc[cc['한 부품만 교체'] <= both, 'p']
     if len(even):
         st.info(f'부품을 맞힐 확률이 **{even.iloc[0]:.2f} 이상**이면 한 부품만 바꾸는 쪽이 두 부품 모두 바꾸는 것보다 쌉니다.')

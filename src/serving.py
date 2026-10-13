@@ -74,13 +74,16 @@ def _group(name):
 
 
 def explain(bundle, pts):
-    """로지스틱 회귀의 특징별 기여도를 신호 묶음별로 더한다.
+    """선형 모델(로지스틱 회귀)의 특징별 기여도를 신호 묶음별로 더한다.
 
     기여도 = 계수 × 표준화한 특징값. 0은 학습 세트 평균 시점과 같다는 뜻이고,
     양수면 위험을 올린 쪽, 음수면 내린 쪽이다. 모두 더하고 절편을 더하면 로그 오즈(확률로 바꾸기 전 값)가 된다.
+    계수가 없는 모델(랜덤포레스트 등)이면 None을 돌려준다.
     """
     model = bundle['model']
     *prep, (_, clf) = model.steps
+    if not hasattr(clf, 'coef_'):
+        return None
     X = pts[bundle['features']].values.astype(float)
     for _, step in prep:
         X = step.transform(X)

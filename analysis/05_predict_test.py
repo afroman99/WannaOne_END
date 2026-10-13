@@ -1,7 +1,7 @@
 """테스트 세트(정답 없음) 24시간 고장위험 예측.
 
 04_model.py에서 검증 세트로 평가한 모델을 그대로 쓴다 (보수적 기준: 평가하지 않은 모델은 내보내지 않는다).
-- 모델: src/model.py의 FINAL (로지스틱 회귀 · 센서 + 정비 이력), 학습 세트로 학습
+- 모델: src/model.py의 FINAL (랜덤포레스트 · 센서 + 정비 이력), 학습 세트로 학습
 - 보정값: 학습 세트 정상 시나리오에서 정한 값 (preprocess.fit_params)
 - 임계값: 학습 세트 교차검증에서 점진 고장을 모두 잡고 진짜 오경보가 0인 임계값 중 가장 낮은 것
 
@@ -29,9 +29,9 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from src.evaluate import choose_threshold, evaluate, failure_events
+from src.evaluate import choose_threshold, evaluate, failure_events, unlabeled_alarms
 from src.features import build_dataset, make_features, make_prediction_points
-from src.model import FEATURES, FINAL, MODELS, oof_predict
+from src.model import FEATURES, FINAL, MODELS, fold_features, oof_from_folds
 from src.posko_data import load_answer, load_scenarios
 from src.preprocess import EQP, apply_params, build_hourly
 from src.serving import save_bundle
@@ -63,13 +63,13 @@ if not same:
 # 2. 학습 세트로 최종 모델 학습, 교차검증으로 임계값
 
 section(f'2. 최종 모델: {FINAL["model"]} · {FINAL["features"]}')
-X, params, _ = build_dataset()
+X, params, hr = build_dataset()
 train = X[X['SPLIT'] == 'train'].reset_index(drop=True)
 cols = FEATURES[FINAL['features']]
 make_model = MODELS[FINAL['model']]
 Xtr, ytr = train[cols].values.astype(float), train['risk24'].values
 
-oof = oof_predict(make_model, Xtr, ytr, train['SCENARIO_ID'].values)
+oof = oof_from_folds(make_model, cols, ytr, fold_features(hr, train))   # 폴드마다 보정값을 다시 정한 교차검증
 th = choose_threshold(train, oof, criterion='earliest', events=failure_events(train['SCENARIO_ID'].unique().tolist()))
 model = make_model().fit(Xtr, ytr)
 print(f'학습 시점 {len(train)}개로 학습 · 임계값 {th:.2f} (학습 세트 교차검증)')
@@ -109,12 +109,16 @@ print(pd.Series(prob).describe(percentiles=[0.5, 0.9, 0.95]).round(3).to_string(
 section('4. 모델 저장')
 res = evaluate(valid.reset_index(drop=True), model.predict_proba(valid[cols].values.astype(float))[:, 1], th)
 ev = res['events'][['SCENARIO_ID', 'WO_NO', 'FAILURE_DT', 'TYPE', '감지', '리드타임(h)']]
+v_ids = valid['SCENARIO_ID'].unique().tolist()
+all_va = make_features(hr[hr['SCENARIO_ID'].isin(v_ids)], make_prediction_points(v_ids))
+ua = unlabeled_alarms(all_va, model.predict_proba(all_va[cols].values.astype(float))[:, 1], th, valid)
 bundle = {
     'model': model, 'threshold': th, 'features': cols, 'params': params, 'final': FINAL,
     'created_at': pd.Timestamp.now(tz='Asia/Seoul').strftime('%Y-%m-%d %H:%M'),
     'n_train_points': len(train),
     'validation': {'point': res['point'], 'event': res['event'], 'cost': res['cost'],
-                   'cost_reference': res['cost_reference'], 'events': ev},
+                   'cost_reference': res['cost_reference'], 'events': ev,
+                   'unlabeled': {k: ua[k] for k in ['시점', '경보 시점', '경보 묶음', '비용 범위']}},
 }
 path = save_bundle(bundle)
 print(f'{path.relative_to(ROOT)} 저장 · 검증 세트 AP {res["point"]["AP"]:.3f}, '

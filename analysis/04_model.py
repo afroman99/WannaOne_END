@@ -14,7 +14,7 @@
 그림 (figures/, 저장소에는 올리지 않음)
   12_model_교차검증_모델비교.png      모델·특징 묶음을 고른 근거 (학습 세트 교차검증 AP)
   13_model_검증_정밀도재현율곡선.png  우리 모델과 기준 예제의 검증 세트 비교
-  14_model_임계값별_경보결과.png      임계값 0.76을 고른 근거 (학습 세트 교차검증)
+  14_model_임계값별_경보결과.png      임계값을 고른 근거 (학습 세트 교차검증)
   15_model_검증_고장별_경보타임라인.png  검증 세트 고장마다 언제 경보가 났는지
 """
 
@@ -35,9 +35,9 @@ from sklearn.pipeline import make_pipeline
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from src.evaluate import (attach_failure_info, choose_threshold, evaluate, event_and_cost, failure_events,
-                          point_metrics, print_report)
-from src.features import build_dataset
-from src.model import FEATURES, MODELS, oof_predict
+                          point_metrics, print_report, unlabeled_alarms)
+from src.features import build_dataset, make_features, make_prediction_points
+from src.model import FEATURES, MODELS, fold_features, oof_from_folds, oof_predict
 from src.plotting import save_figure, setup_korean_font
 from src.posko_data import load_scenarios
 
@@ -79,12 +79,13 @@ def cv_summary(df, oof, events):
 # 2. 학습 세트 교차검증으로 모델·특징 묶음 고르기
 
 section('2. 학습 세트 교차검증 (시나리오 단위 5겹)')
-y_tr, groups = train['risk24'].values, train['SCENARIO_ID'].values
+y_tr = train['risk24'].values
+folds = fold_features(hr, train)          # 폴드마다 학습 부분만으로 보정값을 다시 정한 특징
+print('보정값은 폴드마다 그 폴드의 학습 부분(정상 시나리오)에서 다시 정했다')
 rows, oofs = [], {}
 for fname, cols in FEATURES.items():
-    Xtr = train[cols].values.astype(float)
     for mname, make_model in MODELS.items():
-        oof = oof_predict(make_model, Xtr, y_tr, groups)
+        oof = oof_from_folds(make_model, cols, y_tr, folds)
         th, summ = cv_summary(train, oof, ev_train)
         oofs[(mname, fname)] = (oof, th)
         rows.append({'모델': mname, '특징': fname, **summ})
@@ -104,7 +105,8 @@ spec = importlib.util.spec_from_file_location('baseline', ROOT / 'analysis' / '0
 bl = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bl)
 scen = load_scenarios().query('SPLIT != "test"')
-rec = bl.make_records(bl.load_observations(scen), bl.load_targets(scen))
+obs = bl.load_observations(scen)
+rec = bl.make_records(obs, bl.load_targets(scen))
 rec_tr = rec[rec['SPLIT'] == 'train'].reset_index(drop=True)
 rec_va = rec[rec['SPLIT'] == 'validation'].reset_index(drop=True)
 
@@ -136,6 +138,20 @@ b_val = b_final.predict_proba(np.stack(rec_va['temporal']))[:, 1]
 b_res = evaluate(rec_va, b_val, b_th, ev_valid)
 print_report(b_res, f'기준 예제 (임계값 {b_th:.2f}, 같은 규칙)')
 
+# 정답을 알 수 없어 평가에서 빠진 시점의 경보 (운영 비용에는 들어간다)
+valid_ids = valid['SCENARIO_ID'].unique().tolist()
+all_va = make_features(hr[hr['SCENARIO_ID'].isin(valid_ids)], make_prediction_points(valid_ids))
+ua = unlabeled_alarms(all_va, final.predict_proba(all_va[cols].values.astype(float))[:, 1], th, valid)
+rec_all = bl.make_records(obs, bl.load_targets(scen, keep_unlabeled=True))
+rec_all = rec_all[rec_all['SPLIT'] == 'validation'].reset_index(drop=True)
+ub = unlabeled_alarms(rec_all, b_final.predict_proba(np.stack(rec_all['temporal']))[:, 1], b_th, rec_va)
+for name, u, r in [('우리 모델', ua, res), ('기준 예제', ub, b_res)]:
+    lo, hi = u['비용 범위'][PART_RULE]
+    print(f'\n■ {name}: 정답을 알 수 없는 시점 {u["시점"]}개 중 경보 {u["경보 시점"]}개, 평가된 경보와 이어지지 않는 경보 묶음 {u["경보 묶음"]}개'
+          f'\n  운영 비용({PART_RULE}) = 평가 가능 구간 {r["cost"][PART_RULE]:.0f} + 미확정 경보 {lo:.0f}~{hi:.0f}'
+          f' = {r["cost"][PART_RULE] + lo:.0f}~{r["cost"][PART_RULE] + hi:.0f}')
+print('  주의: 미확정 경보가 관측 뒤의 고장을 막았는지, "아무것도 안 함"에서 관측 뒤에 고장이 났는지는 알 수 없다')
+
 # 참고: 다른 임계값 기준 (모두 학습 세트 교차검증에서 고름)
 for crit, label in [('cost', f'{PART_RULE} 비용 최소'), ('f1', 'F1 최대')]:
     th_ref = choose_threshold(train, oofs[best][0], criterion=crit, events=ev_train)
@@ -148,11 +164,14 @@ summary = pd.DataFrame({
            'TP': r['point']['TP'], 'FP': r['point']['FP'], 'FN': r['point']['FN'],
            '고장 감지': f'{r["event"]["감지"]}/{r["event"]["고장"]}',
            '리드타임 중앙값(h)': r['event']['리드타임 중앙값(h)'],
-           f'비용 ({PART_RULE})': r['cost'][PART_RULE], '비용 (반반, 최악)': r['cost']['반반'],
+           f'비용 ({PART_RULE}, 평가 가능 구간)': r['cost'][PART_RULE],
+           '미확정 경보 묶음': u['경보 묶음'],
+           f'미확정 경보 비용 ({PART_RULE})': '{:.0f}~{:.0f}'.format(*u['비용 범위'][PART_RULE]),
+           '비용 (반반, 최악)': r['cost']['반반'],
            '비용 (맞힘, 상한)': r['cost']['맞힘']}
-    for name, r in {'우리 모델': res, '기준 예제 (같은 규칙)': b_res}.items()
+    for name, (r, u) in {'우리 모델': (res, ua), '기준 예제 (같은 규칙)': (b_res, ub)}.items()
 })
-summary['아무것도 안 함'] = pd.Series({f'비용 ({PART_RULE})': res['cost_reference']['아무것도 안 함'],
+summary['아무것도 안 함'] = pd.Series({f'비용 ({PART_RULE}, 평가 가능 구간)': res['cost_reference']['아무것도 안 함'],
                                   '비용 (반반, 최악)': res['cost_reference']['아무것도 안 함'],
                                   '비용 (맞힘, 상한)': res['cost_reference']['아무것도 안 함']})
 print(summary.to_string())

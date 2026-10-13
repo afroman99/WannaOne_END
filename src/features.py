@@ -29,10 +29,14 @@ FEATURE_SETS = {
     'sensor': _SIG_FEATS + [
         'SCORE', 'SCORE_MAX', 'SCORE_2ND', 'SCORE_F', 'SCORE_SLOPE6',   # 결합 점수 (EDA 9-3)
         'PERSIST_H',                                                    # 평균 점수가 1을 넘은 연속 시간 (EDA 7-3)
-        'SEG_HOURS', 'GAP_H',                                           # 재가동 후 시간, 마지막 운전 구간 이후 공백
+        'GAP_H',                                                        # 마지막 운전 구간 이후 공백
     ],
     'maintenance': ['N_MNT', 'H_SINCE_MNT', 'LAST_PARTIAL', 'LAST_REPAIR', 'LAST_REPLACE'],   # 정비 이력 (팀 결정 F: 사용)
-    'elapsed': ['ELAPSED_H'],                                                                 # 경과 시간 (팀 결정 E: 사용 안 함)
+    # 시간을 세는 특징 (팀 결정 E: 사용 안 함). 계산은 하지만 모델에는 넣지 않는다.
+    #   ELAPSED_H  시나리오 시작 후 경과 시간
+    #   SEG_HOURS  재가동 후 지난 시간. 정비가 없던 시나리오에서는 경과 시간과 같아 같은 착시를 배운다
+    #              (학습 세트 54시간 이후 시점은 관측 종료로 정답 0이 빠져 모두 1이다. 모델 결과 문서 3-4절 E)
+    'elapsed': ['ELAPSED_H', 'SEG_HOURS'],
 }
 
 
@@ -76,7 +80,7 @@ def make_prediction_points(scenario_ids, step_h=6):
     pts['SPLIT'] = pts['SCENARIO_ID'].map(scen['SPLIT'])
     for c in ['risk24', 'RUL_EVENT', 'RUL_HOURS']:   # 정답 열 자리 (테스트 세트에는 정답이 없다)
         pts[c] = np.nan
-    return pts[['SCENARIO_ID', 'SPLIT', 'OBSERVED_AT', 'T_H', 'risk24', 'RUL_EVENT', 'RUL_HOURS']].reset_index(drop=True)
+    return pts[TARGET_COLS].reset_index(drop=True)
 
 
 # 2. 특징
@@ -156,6 +160,19 @@ def make_features(hr, tg):
 
 # 3. 한 번에 만들기
 
+TARGET_COLS = ['SCENARIO_ID', 'SPLIT', 'OBSERVED_AT', 'T_H', 'risk24', 'RUL_EVENT', 'RUL_HOURS']
+
+
+def normal_scenarios(scenario_ids):
+    """주 고장 원인(마찰·고착·제어 지연)이 없는 시나리오. 보정값을 정하는 기준으로만 쓴다.
+
+    진단 정답을 쓰므로, 보정값을 정하는 시나리오(학습 세트, 교차검증에서는 그 폴드의 학습 부분) 안에서만 고른다.
+    """
+    diag = load_answer('diagnostics').query('EQP_CD == @EQP and SCENARIO_ID in @scenario_ids')
+    fault = set(diag.loc[diag['FAULT_MODE'].isin(['friction', 'sticking', 'control-delay']), 'SCENARIO_ID'])
+    return [s for s in scenario_ids if s not in fault]
+
+
 def build_dataset():
     """학습·검증 세트의 예측 시점별 특징·정답 표를 만든다 (약 15초).
 
@@ -167,11 +184,7 @@ def build_dataset():
     scen = load_scenarios()
     ids = scen.loc[scen['SPLIT'] != 'test', 'SCENARIO_ID'].tolist()
     train = scen.loc[scen['SPLIT'] == 'train', 'SCENARIO_ID'].tolist()
-    diag = load_answer('diagnostics').query('EQP_CD == @EQP')
-    fault = set(diag.loc[diag['FAULT_MODE'].isin(['friction', 'sticking', 'control-delay']), 'SCENARIO_ID'])
-    normal_train = [s for s in train if s not in fault]
-
     hr = build_hourly(ids)
-    params = fit_params(hr[hr['SCENARIO_ID'].isin(train)], normal_train)
+    params = fit_params(hr[hr['SCENARIO_ID'].isin(train)], normal_scenarios(train))
     hr = apply_params(hr, params)
     return make_features(hr, make_targets(ids)), params, hr

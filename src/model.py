@@ -82,6 +82,30 @@ def fold_features(hr, train, n_folds=N_FOLDS):
     return folds
 
 
+def time_fold_features(hr, train, n_blocks=6):
+    """시간 순서 교차검증: 시나리오를 시간 순서(번호 순서 = 시작 시각 순서)로 n_blocks개 묶음으로 나누고,
+    k번째 폴드는 앞의 묶음 1..k로 학습해 바로 다음 묶음 k+1을 평가한다 (앞 구간 학습 / 뒤 구간 평가).
+
+    첫 묶음은 평가되지 않는다. 반환은 fold_features와 같은 형식에 더해, 평가된 행 표시(mask)를 준다.
+    보정값도 폴드마다 학습 부분만으로 다시 정한다.
+    """
+    from src.features import TARGET_COLS, make_features, normal_scenarios
+    from src.preprocess import apply_params, fit_params
+
+    ids = sorted(train['SCENARIO_ID'].unique())
+    blocks = np.array_split(np.array(ids), n_blocks)
+    h_train = hr[hr['SCENARIO_ID'].isin(ids)]
+    folds = []
+    for k in range(1, n_blocks):
+        fit_ids = [s for b in blocks[:k] for s in b]
+        tr_idx = np.where(train['SCENARIO_ID'].isin(fit_ids))[0]
+        te_idx = np.where(train['SCENARIO_ID'].isin(blocks[k]))[0]
+        params = fit_params(h_train[h_train['SCENARIO_ID'].isin(fit_ids)], normal_scenarios(fit_ids))
+        folds.append((tr_idx, te_idx, make_features(apply_params(h_train, params), train[TARGET_COLS])))
+    mask = ~train['SCENARIO_ID'].isin(blocks[0]).values
+    return folds, mask
+
+
 def oof_from_folds(make_model, cols, y, folds):
     """fold_features 결과로 겹 밖 예측 확률을 만든다 (모델·특징 묶음을 바꿔도 폴드 특징은 다시 계산하지 않는다)"""
     oof = np.zeros(len(y))

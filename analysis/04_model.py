@@ -8,7 +8,10 @@
   처음에는 "두 부품 교체" 비용 최소로 골랐으나, 비용 규칙이 리드타임을 반영하지 못해 늦은 경보를 골라서 바꿨다
 - 모델 선택: 교차검증 AP가 가장 높은 조합 (임계값과 상관없는 순위 능력). 비용은 함께 보고한다
 - 특징: 센서 특징만 / 센서 + 정비 이력을 비교한다. 경과 시간은 쓰지 않는다.
+- 기준 모델: 학습 없이 네 신호 Z-score 평균(SCORE_F)을 위험도로 쓰는 Z-score 기준 모델을 먼저 같은 규칙으로 평가한다.
 - 기준 예제(02_baseline.py)도 같은 규칙으로 다시 평가해 공정하게 비교한다.
+- 확인: 시간 순서 교차검증(앞 시나리오로 학습 → 뒤 시나리오 평가)으로도 돌려 선택이 얼마나 흔들리는지 본다(선택에는 쓰지 않음).
+- 지표: 혼동행렬, 정밀도, 재현율, F1 (정확도는 쓰지 않는다)
 - 대표 숫자는 이른 경보도 오경보로 센다. 재현율은 점진 고장 기준(돌발 고장은 신호가 없어 제외, 결정 B)이고, 돌발 고장을 포함한 값도 함께 출력한다.
 
 그림 (figures/, 저장소에는 올리지 않음)
@@ -37,7 +40,7 @@ sys.path.insert(0, str(ROOT))
 from src.evaluate import (attach_failure_info, choose_threshold, evaluate, event_and_cost, failure_events,
                           point_metrics, print_report, unlabeled_alarms)
 from src.features import build_dataset, make_features, make_prediction_points
-from src.model import FEATURES, MODELS, fold_features, oof_from_folds, oof_predict
+from src.model import FEATURES, MODELS, fold_features, oof_from_folds, oof_predict, time_fold_features
 from src.plotting import save_figure, setup_korean_font
 from src.posko_data import load_scenarios
 
@@ -97,6 +100,23 @@ best_model, best_feat = best
 print(f'\n→ 선택: {best_model} · {best_feat} (교차검증 AP 최대)')
 print('  (src/model.py의 FINAL에 이 조합을 적어 두고 05_predict_test.py가 그대로 쓴다)')
 
+# 확인: 시간 순서 교차검증 (앞 시나리오로 학습 → 바로 뒤 시나리오로 평가). 선택은 위의 5겹 교차검증으로 한다
+section('2-1. 확인: 시간 순서 교차검증 (시나리오 6묶음, 앞 묶음들로 학습 → 다음 묶음 평가)')
+t_folds, t_mask = time_fold_features(hr, train)
+t_sub = train[t_mask].reset_index(drop=True)
+ev_t = failure_events(t_sub['SCENARIO_ID'].unique().tolist())
+t_rows = []
+for fname, cols_ in FEATURES.items():
+    for mname, make_model in MODELS.items():
+        o = oof_from_folds(make_model, cols_, y_tr, t_folds)[t_mask]
+        t_th, t_summ = cv_summary(t_sub, o, ev_t)
+        t_rows.append({'모델': mname, '특징': fname, **t_summ})
+tcv = pd.DataFrame(t_rows).set_index(['모델', '특징'])
+print(f'평가된 시나리오 {t_sub["SCENARIO_ID"].nunique()}개 (첫 묶음 36개는 학습에만 쓰임)')
+print(tcv.round(3).to_string())
+print(f'\n→ 시간 순서 교차검증 AP 최대: {" · ".join(tcv["CV AP"].idxmax())} ({tcv["CV AP"].max():.3f}) · '
+      f'우리 선택({best_model} · {best_feat}) {tcv.loc[best, "CV AP"]:.3f}, 임계값 {tcv.loc[best, "임계값"]:.2f}')
+
 
 # 3. 기준 예제를 같은 규칙으로 다시 평가
 
@@ -123,6 +143,24 @@ b_th, b_summ = cv_summary(rec_tr, b_oof, ev_train)
 print(pd.Series(b_summ).to_string())
 
 
+# 3-1. Z-score 기준 모델: 학습 없이 네 신호 Z-score 평균(처음 수준 대비, SCORE_F)을 위험도로 쓴다
+
+section('3-1. Z-score 기준 모델 (학습 없음, 같은 임계값 규칙)')
+# 점수의 표준화 기준(정상 분포)도 폴드마다 학습 부분으로 정한 값을 쓴다 (교차검증과 같은 조건)
+z_oof = np.full(len(train), np.nan)
+for _, te_idx, F in folds:
+    z_oof[te_idx] = F['SCORE_F'].values[te_idx]
+LOW = -1e9                                         # 시작 직후·정비 직후처럼 점수가 비면 가장 낮은 위험
+z_oof = np.nan_to_num(z_oof, nan=LOW)
+z_grid = np.unique(np.round(np.quantile(z_oof[z_oof > LOW], np.linspace(0.5, 0.995, 200)), 2))
+z_th = choose_threshold(train, z_oof, criterion='earliest', events=ev_train, grid=z_grid)
+z_res_cv = evaluate(train, z_oof, z_th, ev_train)
+print(f'임계값(점수) {z_th:.2f}: 네 신호의 정상 대비 표준화 점수 평균이 이 값 이상이면 경보')
+print(f'교차검증 AP {average_precision_score(train["risk24"], z_oof):.3f} · '
+      f'점진 고장 감지 {int(z_res_cv["event_by_type"].loc["점진 고장", "감지"])}/{int(z_res_cv["event_by_type"].loc["점진 고장", "고장"])} · '
+      f'리드타임 중앙값 {z_res_cv["event"]["리드타임 중앙값(h)"]:.1f}h')
+
+
 # 4. 검증 세트 평가 (한 번)
 
 section('4. 검증 세트 평가')
@@ -138,6 +176,10 @@ b_val = b_final.predict_proba(np.stack(rec_va['temporal']))[:, 1]
 b_res = evaluate(rec_va, b_val, b_th, ev_valid)
 print_report(b_res, f'기준 예제 (임계값 {b_th:.2f}, 같은 규칙)')
 
+z_val = np.nan_to_num(valid['SCORE_F'].values, nan=LOW)
+z_res = evaluate(valid, z_val, z_th, ev_valid)
+print_report(z_res, f'Z-score 기준 모델 (점수 임계값 {z_th:.2f}, 같은 규칙)')
+
 # 정답을 알 수 없어 평가에서 빠진 시점의 경보 (운영 비용에는 들어간다)
 valid_ids = valid['SCENARIO_ID'].unique().tolist()
 all_va = make_features(hr[hr['SCENARIO_ID'].isin(valid_ids)], make_prediction_points(valid_ids))
@@ -145,7 +187,8 @@ ua = unlabeled_alarms(all_va, final.predict_proba(all_va[cols].values.astype(flo
 rec_all = bl.make_records(obs, bl.load_targets(scen, keep_unlabeled=True))
 rec_all = rec_all[rec_all['SPLIT'] == 'validation'].reset_index(drop=True)
 ub = unlabeled_alarms(rec_all, b_final.predict_proba(np.stack(rec_all['temporal']))[:, 1], b_th, rec_va)
-for name, u, r in [('우리 모델', ua, res), ('기준 예제', ub, b_res)]:
+uz = unlabeled_alarms(all_va, np.nan_to_num(all_va['SCORE_F'].values, nan=LOW), z_th, valid)
+for name, u, r in [('우리 모델', ua, res), ('기준 예제', ub, b_res), ('Z-score 기준 모델', uz, z_res)]:
     lo, hi = u['비용 범위'][PART_RULE]
     print(f'\n■ {name}: 정답을 알 수 없는 시점 {u["시점"]}개 중 경보 {u["경보 시점"]}개, 평가된 경보와 이어지지 않는 경보 묶음 {u["경보 묶음"]}개'
           f'\n  운영 비용({PART_RULE}) = 평가 가능 구간 {r["cost"][PART_RULE]:.0f} + 미확정 경보 {lo:.0f}~{hi:.0f}'
@@ -158,18 +201,25 @@ for crit, label in [('cost', f'{PART_RULE} 비용 최소'), ('f1', 'F1 최대')]
     print_report(evaluate(valid, p_val, th_ref, ev_valid), f'참고: 우리 모델, {label} 임계값 {th_ref:.2f}')
 
 section('5. 요약 (검증 세트, 대표 숫자)')
+def f1(p, r):
+    return 2 * p * r / (p + r) if p + r else 0.0
+
+
 summary = pd.DataFrame({
     name: {'AP': r['point']['AP'], '정밀도': r['point']['정밀도'], '재현율 (돌발 포함)': r['point']['재현율'],
            '재현율 (점진 고장 기준)': r['point']['재현율 (점진 고장만)'],
+           'F1 (돌발 포함)': r['point']['F1'],
+           'F1 (점진 고장 기준)': f1(r['point']['정밀도'], r['point']['재현율 (점진 고장만)']),
            'TP': r['point']['TP'], 'FP': r['point']['FP'], 'FN': r['point']['FN'],
            '고장 감지': f'{r["event"]["감지"]}/{r["event"]["고장"]}',
            '리드타임 중앙값(h)': r['event']['리드타임 중앙값(h)'],
            f'비용 ({PART_RULE}, 평가 가능 구간)': r['cost'][PART_RULE],
-           '미확정 경보 묶음': u['경보 묶음'],
-           f'미확정 경보 비용 ({PART_RULE})': '{:.0f}~{:.0f}'.format(*u['비용 범위'][PART_RULE]),
+           '미확정 경보 묶음': u['경보 묶음'] if u else '—',
+           f'미확정 경보 비용 ({PART_RULE})': '{:.0f}~{:.0f}'.format(*u['비용 범위'][PART_RULE]) if u else '—',
            '비용 (반반, 최악)': r['cost']['반반'],
            '비용 (맞힘, 상한)': r['cost']['맞힘']}
-    for name, (r, u) in {'우리 모델': (res, ua), '기준 예제 (같은 규칙)': (b_res, ub)}.items()
+    for name, (r, u) in {'Z-score 기준 모델': (z_res, uz), '기준 예제 (같은 규칙)': (b_res, ub),
+                         '우리 모델': (res, ua)}.items()
 })
 summary['아무것도 안 함'] = pd.Series({f'비용 ({PART_RULE}, 평가 가능 구간)': res['cost_reference']['아무것도 안 함'],
                                   '비용 (반반, 최악)': res['cost_reference']['아무것도 안 함'],

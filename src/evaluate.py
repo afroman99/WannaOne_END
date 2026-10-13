@@ -1,6 +1,6 @@
 """연주 조기경보 평가: 시점 단위 혼동행렬, 고장 단위 감지, 비용.
 
-평가 결정(reports/연주_조기경보_모델_결과.md 3절의 A~G)은 C·D만 확정이고 나머지는 잠정이라, 선택지를 모두 함께 계산한다.
+평가 결정(reports/연주_조기경보_모델_결과.md 3절의 A~G)은 B·C·D만 확정이고 나머지는 잠정이라, 선택지를 모두 함께 계산한다.
 
     from src.evaluate import evaluate, print_report, choose_threshold
 

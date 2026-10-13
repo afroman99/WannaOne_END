@@ -6,7 +6,7 @@ analysis/05_predict_test.py가 학습한 모델을 models/risk24.joblib에 저�
     from src.serving import load_bundle, score_scenarios, explain
 
     bundle = load_bundle()
-    pts, hr = score_scenarios(['S0289', 'S0290'], bundle)   # 예측 시점별 확률·경보, 1시간 요약
+    pts, hr = score_scenarios(['S0289', 'S0290'], bundle)   # 예측 시점별 확률·경보·주의, 1시간 요약
     contrib = explain(bundle, pts)                           # 시점별·신호 묶음별 기여도
 
 실시간 데이터가 생기면 score_scenarios의 원자료 읽기(build_hourly)만 새로 들어온 데이터로 바꾸면 된다.
@@ -57,13 +57,20 @@ def score_scenarios(scenario_ids, bundle):
     """시나리오들의 예측 시점(6시간마다)별 24시간 고장 확률과 경보.
 
     반환
-      pts  예측 시점 표: SCENARIO_ID, OBSERVED_AT, T_H, 특징들, PROB(확률), ALARM(경보 여부)
+      pts  예측 시점 표: SCENARIO_ID, OBSERVED_AT, T_H, 특징들, PROB(24시간 안 고장 확률), ALARM(경보 여부)
+           주의 모델이 있으면 DEGRADED_PROB(지금 열화 중일 확률)과 STAGE(경보 / 주의 / 정상)도 붙는다
       hr   1시간 요약 표: 신호별 표준화 점수(Z_), 평균 점수(SCORE) — 화면의 신호 흐름용
     """
     hr = apply_params(build_hourly(list(scenario_ids)), bundle['params'])   # 보정값은 학습 세트에서 정한 그대로
     pts = make_features(hr, make_prediction_points(list(scenario_ids)))
     pts['PROB'] = bundle['model'].predict_proba(pts[bundle['features']].values.astype(float))[:, 1]
     pts['ALARM'] = pts['PROB'] >= bundle['threshold']
+    c = bundle.get('caution')
+    if c:   # 2단계 경보: 경보가 아니어도 열화 확률이 주의 기준 이상이면 주의
+        pts['DEGRADED_PROB'] = c['model'].predict_proba(pts[c['features']].values.astype(float))[:, 1]
+        pts['STAGE'] = np.where(pts['ALARM'], '경보', np.where(pts['DEGRADED_PROB'] >= c['threshold'], '주의', '정상'))
+    else:
+        pts['STAGE'] = np.where(pts['ALARM'], '경보', '정상')
     return pts, hr
 
 

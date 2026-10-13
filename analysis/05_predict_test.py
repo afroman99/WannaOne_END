@@ -4,6 +4,7 @@
 - 모델: src/model.py의 FINAL (랜덤포레스트 · 센서 + 정비 이력), 학습 세트로 학습
 - 보정값: 학습 세트 정상 시나리오에서 정한 값 (preprocess.fit_params)
 - 임계값: 학습 세트 교차검증에서 점진 고장을 모두 잡고 진짜 오경보가 0인 임계값 중 가장 낮은 것
+- 2단계 경보의 주의 단계: src/model.py의 CAUTION_FINAL(열화 감지 모델)과 06_caution.py와 같은 규칙의 주의 기준
 
     python analysis/05_predict_test.py
 
@@ -15,6 +16,8 @@ predictions/test_risk24.csv 열
   SCENARIO_ID, OBSERVED_AT, T_H  예측 시점
   RISK24_PROB                    24시간 안 고장 확률
   ALARM                          경보 여부 (RISK24_PROB ≥ 임계값)
+  DEGRADED_PROB                  지금 열화 중일 확률 (주의 모델)
+  STAGE                          경보 / 주의 / 정상 (경보가 아니고 DEGRADED_PROB ≥ 주의 기준이면 주의)
   SCORE, SCORE_F                 네 신호 평균 점수 (재가동 기준, 처음 수준 기준) — 경보 근거 확인용
 
 참고: 데이터셋 앱용 예측 JSON(posko.export_predictions)은 '관측 교환본'의 해시 값이 필요한데,
@@ -29,9 +32,10 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from src.evaluate import choose_threshold, evaluate, failure_events, unlabeled_alarms
+from src.evaluate import (CAUTION_MIN_PRECISION, caution_report, caution_sweep, choose_caution_threshold, choose_threshold,
+                          degraded_now, evaluate, failure_events, unlabeled_alarms)
 from src.features import build_dataset, make_features, make_prediction_points
-from src.model import FEATURES, FINAL, MODELS, fold_features, oof_from_folds
+from src.model import CAUTION_FINAL, FEATURES, FINAL, MODELS, fold_features, oof_from_folds
 from src.posko_data import load_answer, load_scenarios
 from src.preprocess import EQP, apply_params, build_hourly
 from src.serving import save_bundle
@@ -69,10 +73,22 @@ cols = FEATURES[FINAL['features']]
 make_model = MODELS[FINAL['model']]
 Xtr, ytr = train[cols].values.astype(float), train['risk24'].values
 
-oof = oof_from_folds(make_model, cols, ytr, fold_features(hr, train))   # 폴드마다 보정값을 다시 정한 교차검증
-th = choose_threshold(train, oof, criterion='earliest', events=failure_events(train['SCENARIO_ID'].unique().tolist()))
+folds = fold_features(hr, train)                                       # 폴드마다 보정값을 다시 정한 교차검증
+ev_train = failure_events(train['SCENARIO_ID'].unique().tolist())
+oof = oof_from_folds(make_model, cols, ytr, folds)
+th = choose_threshold(train, oof, criterion='earliest', events=ev_train)
 model = make_model().fit(Xtr, ytr)
 print(f'학습 시점 {len(train)}개로 학습 · 임계값 {th:.2f} (학습 세트 교차검증)')
+
+# 주의 모델: 정답 = 지금 열화 중 (06_caution.py와 같은 모델·같은 기준 규칙)
+c_cols = FEATURES[CAUTION_FINAL['features']]
+make_caution = MODELS[CAUTION_FINAL['model']]
+deg_tr = degraded_now(train).astype(int)
+c_oof = oof_from_folds(make_caution, c_cols, deg_tr, folds)
+c_th = choose_caution_threshold(caution_sweep(train, c_oof, oof, th, ev_train))
+caution_model = make_caution().fit(train[c_cols].values.astype(float), deg_tr)
+print(f'주의 모델: {CAUTION_FINAL["model"]} · {CAUTION_FINAL["features"]} · 주의 기준 {c_th:.2f} '
+      f'(학습 세트 교차검증, 주의 정밀도 ≥ {CAUTION_MIN_PRECISION} 중 가장 낮은 값)')
 
 
 # 3. 테스트 세트 특징과 예측
@@ -86,6 +102,9 @@ prob = model.predict_proba(Xte[cols].values.astype(float))[:, 1]
 pred = Xte[['SCENARIO_ID', 'OBSERVED_AT', 'T_H']].copy()
 pred['RISK24_PROB'] = prob.round(4)
 pred['ALARM'] = (prob >= th).astype(int)
+c_prob = caution_model.predict_proba(Xte[c_cols].values.astype(float))[:, 1]
+pred['DEGRADED_PROB'] = c_prob.round(4)
+pred['STAGE'] = np.where(prob >= th, '경보', np.where(c_prob >= c_th, '주의', '정상'))
 pred['SCORE'] = Xte['SCORE'].round(3)
 pred['SCORE_F'] = Xte['SCORE_F'].round(3)
 OUT.parent.mkdir(exist_ok=True)
@@ -94,6 +113,8 @@ pred.to_csv(OUT, index=False, encoding='utf-8-sig')
 print(f'시나리오 {pred["SCENARIO_ID"].nunique()}개, 예측 시점 {len(pred)}개 → {OUT.relative_to(ROOT)}')
 print(f'경보 {int(pred["ALARM"].sum())}개 시점 ({pred["ALARM"].mean():.1%}), '
       f'경보가 한 번이라도 난 시나리오 {pred.loc[pred["ALARM"] == 1, "SCENARIO_ID"].nunique()}개')
+print(f'주의(경보 제외) {int((pred["STAGE"] == "주의").sum())}개 시점, '
+      f'주의 이상이 한 번이라도 난 시나리오 {pred.loc[pred["STAGE"] != "정상", "SCENARIO_ID"].nunique()}개')
 print('센서 특징이 비어 있는 시점(시작 시점·정비 직후):', int(Xte['SCORE'].isna().sum()))
 
 # 검증 세트와 비교: 경보 비율이 크게 다르면 데이터가 달라졌을 가능성을 확인한다
@@ -112,7 +133,12 @@ ev = res['events'][['SCENARIO_ID', 'WO_NO', 'FAILURE_DT', 'TYPE', '감지', '리
 v_ids = valid['SCENARIO_ID'].unique().tolist()
 all_va = make_features(hr[hr['SCENARIO_ID'].isin(v_ids)], make_prediction_points(v_ids))
 ua = unlabeled_alarms(all_va, model.predict_proba(all_va[cols].values.astype(float))[:, 1], th, valid)
+va = valid.reset_index(drop=True)
+c_sum, c_ev = caution_report(va, caution_model.predict_proba(va[c_cols].values.astype(float))[:, 1], c_th,
+                             model.predict_proba(va[cols].values.astype(float))[:, 1], th)
 bundle = {
+    'caution': {'model': caution_model, 'threshold': c_th, 'features': c_cols, 'final': CAUTION_FINAL,
+                'min_precision': CAUTION_MIN_PRECISION, 'validation': c_sum, 'validation_events': c_ev},
     'model': model, 'threshold': th, 'features': cols, 'params': params, 'final': FINAL,
     'created_at': pd.Timestamp.now(tz='Asia/Seoul').strftime('%Y-%m-%d %H:%M'),
     'n_train_points': len(train),
@@ -123,3 +149,4 @@ bundle = {
 path = save_bundle(bundle)
 print(f'{path.relative_to(ROOT)} 저장 · 검증 세트 AP {res["point"]["AP"]:.3f}, '
       f'고장 감지 {res["event"]["감지"]}/{res["event"]["고장"]}, 비용(두 부품) {res["cost"]["두 부품"]:.0f}')
+print(f'  주의 단계: 검증 세트 주의 정밀도 {c_sum["주의 정밀도"]:.3f}, 경보보다 먼저 평균 {c_sum["추가 준비 시간 평균(h)"]:.1f}시간')

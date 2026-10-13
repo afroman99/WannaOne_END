@@ -42,6 +42,9 @@ MODELS = {
 # 04_model.py에서 학습 세트 교차검증 AP로 고르고 검증 세트에서 평가한 최종 조합 (2026-10-13)
 FINAL = {'model': '랜덤포레스트', 'features': '센서 + 정비 이력'}
 
+# 2단계 경보의 주의 모델: '지금 열화 중인가'를 맞힌다. 06_caution.py에서 학습 세트 교차검증 AP로 고름 (2026-10-13)
+CAUTION_FINAL = {'model': '랜덤포레스트', 'features': '센서'}
+
 
 def oof_predict(make_model, X, y, groups, n_folds=N_FOLDS):
     """시나리오 단위 n겹 교차검증의 겹 밖 예측 확률 (같은 시나리오는 한 겹에만 들어간다).

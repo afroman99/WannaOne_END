@@ -271,6 +271,83 @@ def choose_threshold(df, prob, criterion='earliest', part_rule='두 부품', all
     return float(max(scores, key=scores.get))
 
 
+# 6. 2단계 경보의 주의 단계 (analysis/06_caution.py)
+
+# 주의 기준: 주의 묶음 중 85% 이상은 실제로 열화 중인 설비여야 한다. 그 안에서 가장 낮은(가장 이른) 임계값
+# 처음에는 0.9였으나 현장 대응(주의 → 장비 점검, 설비가 돌면 다음 정비 때 함께 정비)을 근거로 0.85로 낮췄다 (결과보고서 7-5절)
+CAUTION_MIN_PRECISION = 0.85
+
+
+def degraded_now(df):
+    """시점마다 진단 정답상 '지금 열화 중'인지 (주의 단계의 정답).
+
+    진단 정답(diagnostics)의 열화(degraded) 구간 START_AT ≤ 시점 < END_AT 이면 True.
+    열화 구간은 정답을 알 수 없는 관측 끝부분에도 있으므로, 24시간 정답과 달리 잘리는 시점이 없다.
+    """
+    dg = load_answer('diagnostics').query('EQP_CD == @EQP and HEALTH_STATE == "degraded"')
+    pts = df[['SCENARIO_ID', 'OBSERVED_AT']].reset_index(drop=True).reset_index()
+    m = pts.merge(dg[['SCENARIO_ID', 'START_AT', 'END_AT']], on='SCENARIO_ID')
+    hit = m.loc[(m['OBSERVED_AT'] >= m['START_AT']) & (m['OBSERVED_AT'] < m['END_AT']), 'index'].unique()
+    return np.isin(np.arange(len(df)), hit)
+
+
+def _caution(d, p_caution, t_caution, p_alarm, t_alarm, events):
+    """d: attach_failure_info 결과에 DEG(degraded_now) 열을 붙인 표"""
+    alarm = np.asarray(p_alarm) >= t_alarm
+    stage = alarm | (np.asarray(p_caution) >= t_caution)    # 경보가 나면 주의도 켜진 것으로 본다
+    ep = _alarm_episodes(d, stage)
+    g = ep.groupby('EP')['DEG'].any()
+    ev = events[(events['SCENARIO_ID'].isin(d['SCENARIO_ID'])) & (events['TYPE'] == '점진 고장')][['SCENARIO_ID', 'WO_NO']].copy()
+    lead = lambda on: d[on & (d['HTF'] >= MIN_LEAD_H)].groupby('FAIL_WO')['HTF'].max()
+    ev['주의 리드타임(h)'] = ev['WO_NO'].map(lead(stage))
+    ev['경보 리드타임(h)'] = ev['WO_NO'].map(lead(alarm))
+    ev['추가 준비 시간(h)'] = ev['주의 리드타임(h)'] - ev['경보 리드타임(h)']
+    extra = ev['추가 준비 시간(h)']
+    summary = {
+        '주의 임계값': t_caution, '주의 시점': int(stage.sum()),
+        '주의 묶음': len(g), '열화 아닌 설비의 주의': int((~g).sum()),
+        '주의 정밀도': g.mean() if len(g) else np.nan,
+        '점진 고장': len(ev), '주의로 감지': int(ev['주의 리드타임(h)'].notna().sum()),
+        '주의 리드타임 중앙값(h)': ev['주의 리드타임(h)'].median(),
+        '경보 리드타임 중앙값(h)': ev['경보 리드타임(h)'].median(),
+        '추가 준비 시간 평균(h)': extra.mean(), '추가 준비 시간 중앙값(h)': extra.median(),
+        '경보보다 12시간 이상 먼저': int((extra >= 12).sum()),
+    }
+    return summary, ev
+
+
+def caution_report(df, p_caution, t_caution, p_alarm, t_alarm, events=None):
+    """주의 단계 평가: 주의 묶음 중 실제 열화 비율(정밀도)과, 점진 고장마다 경보보다 얼마나 먼저 주의가 켜졌는지.
+
+    주의 단계 = 주의 확률 ≥ t_caution 또는 경보 확률 ≥ t_alarm (경보는 주의를 포함한다)
+    주의 묶음  = 같은 시나리오·같은 운전 구간에서 연속으로 주의가 켜진 시점들 (경보 묶음과 같은 규칙)
+    맞은 주의  = 묶음 안에 진단 정답상 열화 중인 시점이 하나라도 있음
+    추가 준비 시간 = 주의 리드타임 − 경보 리드타임 (부품 조달에 더 쓸 수 있는 시간)
+    """
+    if events is None:
+        events = failure_events(df['SCENARIO_ID'].unique().tolist())
+    d = attach_failure_info(df.reset_index(drop=True), events)
+    d['DEG'] = degraded_now(d)
+    return _caution(d, p_caution, t_caution, p_alarm, t_alarm, events)
+
+
+def caution_sweep(df, p_caution, p_alarm, t_alarm, events=None, grid=np.round(np.arange(0.05, 1.0, 0.01), 2)):
+    """주의 임계값 후보마다 caution_report 요약 (임계값 고르기·그림용)"""
+    if events is None:
+        events = failure_events(df['SCENARIO_ID'].unique().tolist())
+    d = attach_failure_info(df.reset_index(drop=True), events)
+    d['DEG'] = degraded_now(d)
+    return pd.DataFrame([_caution(d, p_caution, t, p_alarm, t_alarm, events)[0] for t in grid])
+
+
+def choose_caution_threshold(sweep, min_precision=CAUTION_MIN_PRECISION):
+    """주의 정밀도가 min_precision 이상인 임계값 중 가장 낮은 것 (가장 일찍 주의). 없으면 정밀도가 가장 높은 것"""
+    ok = sweep[sweep['주의 정밀도'] >= min_precision]
+    if ok.empty:
+        return float(sweep.loc[sweep['주의 정밀도'].idxmax(), '주의 임계값'])
+    return float(ok['주의 임계값'].min())
+
+
 def print_report(res, title=''):
     if title:
         print(f'\n■ {title}')

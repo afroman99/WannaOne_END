@@ -7,7 +7,11 @@
 
     python analysis/05_predict_test.py
 
-결과: predictions/test_risk24.csv (CSV라 저장소에는 올리지 않음)
+결과 (둘 다 저장소에는 올리지 않음)
+  predictions/test_risk24.csv    테스트 세트 예측
+  models/risk24.joblib           학습한 모델·임계값·보정값·검증 세트 결과 (대시보드 app/dashboard.py가 불러온다)
+
+predictions/test_risk24.csv 열
   SCENARIO_ID, OBSERVED_AT, T_H  예측 시점
   RISK24_PROB                    24시간 안 고장 확률
   ALARM                          경보 여부 (RISK24_PROB ≥ 임계값)
@@ -25,11 +29,12 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from src.evaluate import choose_threshold, failure_events
+from src.evaluate import choose_threshold, evaluate, failure_events
 from src.features import build_dataset, make_features, make_prediction_points
 from src.model import FEATURES, FINAL, MODELS, oof_predict
 from src.posko_data import load_answer, load_scenarios
 from src.preprocess import EQP, apply_params, build_hourly
+from src.serving import save_bundle
 
 OUT = ROOT / 'predictions' / 'test_risk24.csv'
 
@@ -97,3 +102,20 @@ v_alarm = (model.predict_proba(valid[cols].values.astype(float))[:, 1] >= th).me
 print(f'참고: 같은 모델의 검증 세트 경보 비율 {v_alarm:.1%} (정답 시점 기준이라 정확히 같은 조건은 아님)')
 print('\n확률 분포 (테스트 세트)')
 print(pd.Series(prob).describe(percentiles=[0.5, 0.9, 0.95]).round(3).to_string())
+
+
+# 4. 모델 저장 (대시보드용)
+
+section('4. 모델 저장')
+res = evaluate(valid.reset_index(drop=True), model.predict_proba(valid[cols].values.astype(float))[:, 1], th)
+ev = res['events'][['SCENARIO_ID', 'WO_NO', 'FAILURE_DT', 'TYPE', '감지', '리드타임(h)']]
+bundle = {
+    'model': model, 'threshold': th, 'features': cols, 'params': params, 'final': FINAL,
+    'created_at': pd.Timestamp.now(tz='Asia/Seoul').strftime('%Y-%m-%d %H:%M'),
+    'n_train_points': len(train),
+    'validation': {'point': res['point'], 'event': res['event'], 'cost': res['cost'],
+                   'cost_reference': res['cost_reference'], 'events': ev},
+}
+path = save_bundle(bundle)
+print(f'{path.relative_to(ROOT)} 저장 · 검증 세트 AP {res["point"]["AP"]:.3f}, '
+      f'고장 감지 {res["event"]["감지"]}/{res["event"]["고장"]}, 비용(두 부품) {res["cost"]["두 부품"]:.0f}')

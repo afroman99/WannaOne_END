@@ -4,7 +4,7 @@
 
     from src.evaluate import evaluate, print_report, choose_threshold
 
-    th = choose_threshold(train_df, train_prob, criterion='f1')     # 'f1' / 'f2' / 'cost'
+    th = choose_threshold(train_df, train_oof_prob)                  # 잠정 결정: 점진 고장 모두 감지 + 진짜 오경보 0 중 가장 낮은 임계값
     res = evaluate(valid_df, valid_prob, th)
     print_report(res)
 
@@ -190,26 +190,47 @@ def evaluate(df, prob, th, events=None):
             'cost': cost, 'cost_reference': refs, 'events': ev}
 
 
-def choose_threshold(df, prob, criterion='f1', part_rule='맞힘', grid=np.arange(0.05, 0.96, 0.05), events=None):
-    """임계값을 고른다 (논의 항목 D). 학습 세트(교차검증 예측)에서 고르고 검증 세트에 그대로 쓴다.
+def choose_threshold(df, prob, criterion='earliest', part_rule='두 부품', all_gradual=True,
+                     grid=np.round(np.arange(0.01, 1.0, 0.01), 2), events=None):
+    """임계값을 고른다 (논의 항목 D). 학습 세트의 교차검증 예측에서 고르고 검증 세트에 그대로 쓴다.
 
-    criterion: 'f1' / 'f2'(재현율 중시) / 'cost'(part_rule 가정의 비용 최소)
+    criterion
+      'earliest' (잠정 결정) 점진 고장을 모두 잡고 진짜 오경보(고장 예정이 없는 경보 묶음)가 0인 임계값 중 가장 낮은 것.
+                 오경보 없이 가장 일찍 경보한다. 그런 임계값이 없으면 진짜 오경보가 가장 적은 것 중 가장 낮은 것
+      'cost'     part_rule 가정의 비용 최소 (같으면 높은 임계값). 비용 규칙은 교체할 4시간만 있으면
+                 막았다고 보므로 리드타임을 반영하지 못해 늦은 경보를 고르는 경향이 있다(참고용)
+      'f1' / 'f2'  시점 단위 F1 / F2(재현율 중시) 최대
+    all_gradual 'earliest'·'cost'에서 점진 고장을 하나도 놓치지 않는 임계값 중에서만 고른다
     """
     prob = np.asarray(prob, dtype=float)
-    if criterion == 'cost':
+    if criterion in ('earliest', 'cost'):
         if events is None:
             events = failure_events(df['SCENARIO_ID'].unique().tolist())
         d = attach_failure_info(df.reset_index(drop=True), events)
-        scores = {t: -event_and_cost(d, prob, t, events)[2][part_rule] for t in grid}
-    else:
-        y = df['risk24'].values.astype(int)
-        b = 1 if criterion == 'f1' else 2
+        rows = []
+        for t in grid:
+            summary, by_type, cost, _, _ = event_and_cost(d, prob, t, events)
+            g = by_type.loc['점진 고장'] if '점진 고장' in by_type.index else None
+            all_g = g is None or int(g['감지']) == int(g['고장'])
+            rows.append({'t': t, 'cost': cost[part_rule], 'all_g': all_g,
+                         'false': summary['고장과 무관한 경보 묶음: 오경보']})
+        cand = [r for r in rows if r['all_g']] if all_gradual else rows
+        if all_gradual and not cand:
+            print('  알림: 점진 고장을 모두 잡는 임계값이 없어 조건 없이 고른다')
+            cand = rows
+        if criterion == 'earliest':
+            fewest = min(r['false'] for r in cand)
+            return float(min(r['t'] for r in cand if r['false'] == fewest))
+        best = min(r['cost'] for r in cand)
+        return float(max(r['t'] for r in cand if r['cost'] == best))
+    y = df['risk24'].values.astype(int)
+    b = 1 if criterion == 'f1' else 2
 
-        def fb(t):
-            a = prob >= t
-            tp, fp, fn = (a & (y == 1)).sum(), (a & (y == 0)).sum(), (~a & (y == 1)).sum()
-            return (1 + b * b) * tp / ((1 + b * b) * tp + b * b * fn + fp) if tp else 0.0
-        scores = {t: fb(t) for t in grid}
+    def fb(t):
+        a = prob >= t
+        tp, fp, fn = (a & (y == 1)).sum(), (a & (y == 0)).sum(), (~a & (y == 1)).sum()
+        return (1 + b * b) * tp / ((1 + b * b) * tp + b * b * fn + fp) if tp else 0.0
+    scores = {t: fb(t) for t in grid}
     return float(max(scores, key=scores.get))
 
 

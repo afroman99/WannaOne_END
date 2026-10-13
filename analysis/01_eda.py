@@ -1,7 +1,7 @@
 """연주 설비(P1-CC1-INS01) 조기경보 EDA.
 
 개인 탐색 노트북(eda.ipynb)에서 확정한 내용을 처음부터 끝까지 다시 계산한다.
-절 번호는 노트북·팀 공유 문서(reports/연주_조기경보_EDA_정리.md)와 같다.
+절 번호는 노트북·팀 공유 문서(reports/연주_조기경보_EDA_근거.md)의 근거 번호와 함께 적혀 있다.
 
     python analysis/01_eda.py
 
@@ -612,4 +612,4 @@ for r in part.itertuples():
                  '정비 끝 → 고장(h)': (f - r.END_DT).total_seconds() / 3600 if pd.notna(f) else np.nan})
 show(pd.DataFrame(rows).round(1), '11-3. 부분 정비 뒤 다음 열화·고장까지 걸린 시간')
 
-section('완료: 결론과 결정 사항은 reports/연주_조기경보_EDA_정리.md 참고')
+section('완료: 결론과 결정 사항은 reports/연주_조기경보_EDA_근거.md 참고')

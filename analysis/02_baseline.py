@@ -29,6 +29,7 @@ from sklearn.metrics import average_precision_score, f1_score, precision_score, 
 from sklearn.pipeline import make_pipeline
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.evaluate import evaluate as evaluate_alarms, print_report
 from src.posko_data import load_answer, load_scenarios, load_source
 
 EQP = 'P1-CC1-INS01'
@@ -90,7 +91,8 @@ def make_records(obs, tg):
         f = window_features(obs_by[r.SCENARIO_ID], r.h)
         if f is None:
             continue
-        rows.append({'SCENARIO_ID': r.SCENARIO_ID, 'SPLIT': r.SPLIT, 'h': r.h, 'risk24': r.risk24,
+        rows.append({'SCENARIO_ID': r.SCENARIO_ID, 'SPLIT': r.SPLIT, 'h': r.h, 'OBSERVED_AT': r.OBSERVED_AT,
+                     'risk24': r.risk24,
                      'RUL_EVENT': r.RUL_EVENT, 'RUL_HOURS': r.RUL_HOURS,
                      'current': f[0], 'temporal': f[1]})
     return pd.DataFrame(rows)
@@ -120,34 +122,6 @@ def evaluate(rec):
     return pd.DataFrame(report), valid.assign(**{f'p_{m}': v for m, v in probs.items()})
 
 
-# 4. 오류 나누어 보기: 오경보와 놓친 고장이 어떤 성격인지 (검증 세트, temporal 모델)
-
-def sudden_failures(scen):
-    """열화 구간 없이 정상에서 바로 고장 난 시나리오 (EDA 7-1의 돌발 고장)"""
-    mnt = load_source('maintenance').query('EQP_TAG == @EQP and FAILURE_DT.notna()', engine='python')
-    dg = load_answer('diagnostics').query('EQP_CD == @EQP and HEALTH_STATE == "degraded"')
-    x = mnt.merge(dg[['SCENARIO_ID', 'END_AT']], on='SCENARIO_ID')
-    gradual = set(x.loc[(x['END_AT'] - x['FAILURE_DT']).abs() <= pd.Timedelta(seconds=1), 'WO_NO'])
-    return set(mnt.loc[~mnt['WO_NO'].isin(gradual) & mnt['SCENARIO_ID'].isin(scen['SCENARIO_ID']), 'SCENARIO_ID'])
-
-
-def error_breakdown(valid, th, sudden):
-    alarm = valid['p_temporal'] >= th
-    fp = valid[alarm & (valid['risk24'] == 0)]
-    fn = valid[~alarm & (valid['risk24'] == 1)]
-    tp = valid[alarm & (valid['risk24'] == 1)]
-    print(f'경보 {int(alarm.sum())}개 = 맞은 경보 {len(tp)} + 오경보 {len(fp)}')
-    print(f'  오경보 중 고장이 24시간 넘게 남은 "이른 경보" (RUL_EVENT=1): {int((fp["RUL_EVENT"] == 1).sum())}개,'
-          f' 남은 고장 시간 {fp.loc[fp["RUL_EVENT"] == 1, "RUL_HOURS"].min():.1f}~{fp.loc[fp["RUL_EVENT"] == 1, "RUL_HOURS"].max():.1f}h')
-    print(f'  오경보 중 관측 기간 안에 고장 예정 없음: {int((fp["RUL_EVENT"] == 0).sum())}개')
-    print(f'놓친 양성 {len(fn)}개 = 돌발 고장 시나리오 {int(fn["SCENARIO_ID"].isin(sudden).sum())}'
-          f' + 점진 고장 시나리오 {int((~fn["SCENARIO_ID"].isin(sudden)).sum())}')
-    pos = valid[valid['risk24'] == 1]
-    g = pos[~pos['SCENARIO_ID'].isin(sudden)]
-    print(f'재현율: 전체 {len(tp) / len(pos):.3f}, 점진 고장만 {(g["p_temporal"] >= th).mean():.3f} '
-          f'(돌발 고장 양성 {int(pos["SCENARIO_ID"].isin(sudden).sum())}개 제외)')
-
-
 if __name__ == '__main__':
     scen = load_scenarios().query('SPLIT != "test"')
     obs = load_observations(scen)
@@ -159,4 +133,6 @@ if __name__ == '__main__':
     print()
     print('주의: 임계값을 검증 세트에서 고르고 같은 검증 세트로 평가하므로 정밀도·재현율은 낙관적이다.')
     print()
-    error_breakdown(valid, report.loc['임계값', 'temporal'], sudden_failures(scen))
+    # 4. 평가 함수(src/evaluate.py)로 오경보·놓친 고장을 나누고 고장 단위·비용까지 본다
+    print_report(evaluate_alarms(valid, valid['p_temporal'].values, report.loc['임계값', 'temporal']),
+                 '기준 예제 temporal (검증 세트)')

@@ -57,6 +57,28 @@ def make_targets(scenario_ids):
     return tg[['SCENARIO_ID', 'SPLIT', 'OBSERVED_AT', 'T_H', 'risk24', 'RUL_EVENT', 'RUL_HOURS']].reset_index(drop=True)
 
 
+def make_prediction_points(scenario_ids, step_h=6):
+    """정답 파일 없이 예측 시점을 만든다 (테스트 세트용).
+
+    시나리오 시작 후 0, 6, ..., 66시간 시점 중 그 시각에 정비 중이 아닌 시점.
+    정비 중인지는 정비 기록의 시작 시각으로 판단한다(시작된 정비는 그 시각에 이미 알려진 정보).
+    학습·검증 세트에서 이 규칙은 targets의 AT_RISK=1과 정확히 일치한다(analysis/05_predict_test.py에서 확인).
+    """
+    scen = load_scenarios().set_index('SCENARIO_ID')
+    pts = pd.DataFrame([(s, h) for s in scenario_ids for h in range(0, 72, step_h)], columns=['SCENARIO_ID', 'T_H'])
+    pts['OBSERVED_AT'] = (pts['SCENARIO_ID'].map(scen['START_AT'])
+                          + pd.to_timedelta(pts['T_H'], unit='h')).astype('datetime64[ms, UTC]')
+    mnt = load_source('maintenance').query('EQP_TAG == @EQP and SCENARIO_ID in @scenario_ids')
+    m = pts.merge(mnt[['SCENARIO_ID', 'STRT_DT', 'END_DT']], on='SCENARIO_ID')
+    busy = m[(m['STRT_DT'] <= m['OBSERVED_AT']) & ((m['END_DT'] > m['OBSERVED_AT']) | m['END_DT'].isna())]
+    busy_keys = set(zip(busy['SCENARIO_ID'], busy['OBSERVED_AT']))
+    pts = pts[[k not in busy_keys for k in zip(pts['SCENARIO_ID'], pts['OBSERVED_AT'])]]
+    pts['SPLIT'] = pts['SCENARIO_ID'].map(scen['SPLIT'])
+    for c in ['risk24', 'RUL_EVENT', 'RUL_HOURS']:   # 정답 열 자리 (테스트 세트에는 정답이 없다)
+        pts[c] = np.nan
+    return pts[['SCENARIO_ID', 'SPLIT', 'OBSERVED_AT', 'T_H', 'risk24', 'RUL_EVENT', 'RUL_HOURS']].reset_index(drop=True)
+
+
 # 2. 특징
 
 def _slope(y):

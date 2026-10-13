@@ -18,22 +18,18 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score
-from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from src.evaluate import choose_threshold, evaluate, failure_events, print_report
-from src.features import FEATURE_SETS, build_dataset
+from src.features import build_dataset
+from src.model import FEATURES, MODELS, oof_predict
 from src.posko_data import load_scenarios
 
-N_FOLDS = 5
-SEED = 31
 PART_RULE = '두 부품'
 
 
@@ -51,31 +47,6 @@ ev_train = failure_events(train['SCENARIO_ID'].unique().tolist())
 ev_valid = failure_events(valid['SCENARIO_ID'].unique().tolist())
 print(f'학습 {len(train)}개 시점 (양성 {int(train["risk24"].sum())}, 고장 {len(ev_train)}건) · '
       f'검증 {len(valid)}개 시점 (양성 {int(valid["risk24"].sum())}, 고장 {len(ev_valid)}건)')
-
-FEATURES = {
-    '센서': FEATURE_SETS['sensor'],
-    '센서 + 정비 이력': FEATURE_SETS['sensor'] + FEATURE_SETS['maintenance'],
-}
-MODELS = {
-    '로지스틱 회귀': lambda: make_pipeline(SimpleImputer(add_indicator=True), StandardScaler(),
-                                       LogisticRegression(C=1.0, class_weight='balanced', max_iter=2000)),
-    '랜덤포레스트': lambda: make_pipeline(SimpleImputer(add_indicator=True),
-                                     RandomForestClassifier(n_estimators=300, max_depth=7, min_samples_leaf=5,
-                                                            class_weight='balanced', random_state=SEED, n_jobs=-1)),
-    '그래디언트 부스팅': lambda: HistGradientBoostingClassifier(max_depth=3, learning_rate=0.05, max_iter=300,
-                                                          l2_regularization=1.0, class_weight='balanced',
-                                                          random_state=SEED),
-}
-
-
-def oof_predict(make_model, Xtr, y, groups):
-    """시나리오 단위 5겹 교차검증의 겹 밖 예측 확률"""
-    oof = np.zeros(len(y))
-    for tr_idx, te_idx in GroupKFold(n_splits=N_FOLDS).split(Xtr, y, groups):
-        m = make_model().fit(Xtr[tr_idx], y[tr_idx])
-        oof[te_idx] = m.predict_proba(Xtr[te_idx])[:, 1]
-    return oof
-
 
 def cv_summary(df, oof, events):
     """교차검증 예측으로 임계값을 고르고, 그 임계값에서의 교차검증 성능"""
@@ -110,6 +81,7 @@ print(cv.round(3).to_string())
 best = cv['CV AP'].idxmax()
 best_model, best_feat = best
 print(f'\n→ 선택: {best_model} · {best_feat} (교차검증 AP 최대)')
+print('  (src/model.py의 FINAL에 이 조합을 적어 두고 05_predict_test.py가 그대로 쓴다)')
 
 
 # 3. 기준 예제를 같은 규칙으로 다시 평가

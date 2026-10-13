@@ -187,3 +187,6 @@ cython_debug/
 .DS_Store
 
 # 데이터는 data/ 폴더에 별도로 둔다 (위 *.csv 규칙)
+
+# 변환된 데이터 (src/posko_data.py가 만든다)
+*.parquet

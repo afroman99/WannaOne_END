@@ -38,7 +38,11 @@ SIGNAL_NAMES = {'Z_MLD-AMP': '몰드 레벨 진폭', 'Z_CONTROL_DELAY': '제어 
                 'Z_WDL': '인발 부하', 'Z_OSC-STK': '진동 스트로크'}
 SPLITS = {'테스트 (정답 없음)': 'test', '검증 (정답 있음)': 'validation'}
 ALARM_RED, CAUTION_YELLOW, OK_GRAY, MNT_GRAY = '#d64545', '#e0a526', '#9e9e9e', '#bdbdbd'
-STAGE_COLORS = alt.Scale(domain=['경보', '주의', '정상'], range=[ALARM_RED, CAUTION_YELLOW, OK_GRAY])
+# 화면에 보여 줄 단계 이름: 정상(NORMAL) → 주의(CAUTION, 열화 감지) → 경보(WARNING, 24시간 고장 위험)
+# 모델 출력(STAGE)은 '경보'/'주의'/'정상' 그대로 두고 화면에서만 이름을 바꾼다 (결과보고서 7-7절 ⑥)
+LABEL = {'경보': '경보 (WARNING)', '주의': '주의 (CAUTION)', '정상': '정상 (NORMAL)'}
+WARN, CAU, NORM = LABEL['경보'], LABEL['주의'], LABEL['정상']
+STAGE_COLORS = alt.Scale(domain=[WARN, CAU, NORM], range=[ALARM_RED, CAUTION_YELLOW, OK_GRAY])
 
 
 # 데이터 불러오기 (처음 한 번만 계산하고 기억해 둔다)
@@ -126,6 +130,7 @@ def status_table():
         nxt = fails[fails['FAIL_H'] > now].groupby('SCENARIO_ID')['FAIL_H'].min()
         t['다음 실제 고장까지 (h, 정답)'] = (nxt - now).round(1)
     order = t['상태'].map({'경보': 0, '주의': 1, '정상': 2}).fillna(3)
+    t['상태'] = t['상태'].replace(LABEL)
     return t.assign(_o=order).sort_values(['_o', '위험 확률'], ascending=[True, False]).drop(columns='_o')
 
 
@@ -149,14 +154,14 @@ def mnt_layer(sid, y_field_max):
 if page == '전체 현황':
     st.header(f'전체 현황 · 지금 {now}시간 · {split_label}')
     t = status_table()
-    n_alarm, n_caution = int((t['상태'] == '경보').sum()), int((t['상태'] == '주의').sum())
+    n_alarm, n_caution = int((t['상태'] == WARN).sum()), int((t['상태'] == CAU).sum())
     c1, c2, c3, c4 = st.columns(4)
     c1.metric('설비 수', len(t))
-    c2.metric('지금 경보', n_alarm)
-    c3.metric('지금 주의', n_caution if CAUTION else '—', help=None if CAUTION else '주의 모델이 없는 모델 파일입니다')
+    c2.metric('지금 경보 (WARNING)', n_alarm)
+    c3.metric('지금 주의 (CAUTION)', n_caution if CAUTION else '—', help=None if CAUTION else '주의 모델이 없는 모델 파일입니다')
     c4.metric('정비 중·예측 대기', int(t['상태'].isin(['정비 중', '정비 후 예측 대기']).sum()))
-    st.caption((f'두 확률은 6시간마다 계산합니다. **주의**: 지금 열화 중일 확률 ≥ {CTH:.2f} · ' if CAUTION else '위험 확률은 6시간마다 계산합니다. ')
-               + f'**경보**: 24시간 안 고장 확률(위험 확률) ≥ {TH:.2f}. '
+    st.caption((f'두 확률은 6시간마다 계산합니다. **주의 (CAUTION, 열화 감지)**: 지금 열화 중일 확률 ≥ {CTH:.2f} · ' if CAUTION else '위험 확률은 6시간마다 계산합니다. ')
+               + f'**경보 (WARNING, 24시간 고장 위험)**: 24시간 안 고장 확률(위험 확률) ≥ {TH:.2f}. '
                '가장 많이 벗어난 신호는 마지막 1시간 기준이며, 표준화 점수 1이 정상 범위의 경계입니다.')
 
     if CAUTION:
@@ -171,7 +176,7 @@ if page == '전체 현황':
         st.caption(f'재고가 이보다 적으면 지금 발주를 시작하세요. 주의 중 일부(검증 세트 {cv["주의 묶음"]}번 중 '
                    f'{cv["열화 아닌 설비의 주의"]}번)는 열화가 아니었던 헛걸음입니다.')
 
-    st.subheader('설비별 상태 (경보 → 주의 → 정상 순)')
+    st.subheader('설비별 상태 (경보 WARNING → 주의 CAUTION → 정상 NORMAL 순)')
     st.dataframe(
         t, hide_index=True, height=520,
         column_config={
@@ -204,13 +209,13 @@ elif page == '설비 상세':
     else:
         c3.metric('첫 경보', '—' if pd.isna(row['첫 경보 (h)']) else f'{row["첫 경보 (h)"]:.0f}시간')
 
-    if row['상태'] == '경보':
+    if row['상태'] == WARN:
         st.error(
             '**조치 안내** · 24시간 안에 고장 날 위험이 높습니다.\n'
             '- 교체에 4시간이 걸리므로, 늦어도 고장 예상 4시간 전에는 교체를 시작해야 합니다.\n'
             '- 센서로는 원인 부품(진동장치·밸브)을 구분할 수 없습니다. 두 부품을 모두 점검하세요.\n'
             '- 고장 원인과 상관없이 같은 신호가 오르므로, 아래 신호 흐름으로 열화가 계속되는지 확인하세요.')
-    elif row['상태'] == '주의':
+    elif row['상태'] == CAU:
         st.warning(
             '**조치 안내 · 주의** · 열화가 시작된 것으로 보입니다. 아직 24시간 안 고장 위험은 낮습니다.\n'
             '- 장비 상태를 확인하세요. 설비가 정상적으로 돌아가면 **다음 정비 때 이 부분까지 함께 정비**합니다.\n'
@@ -224,6 +229,7 @@ elif page == '설비 상세':
 
     # 위험 확률 흐름
     p = pts_now[pts_now['SCENARIO_ID'] == sid].rename(columns={'STAGE': '단계'})
+    p['단계'] = p['단계'].replace(LABEL)
     x = alt.X('T_H:Q', title='시나리오 시작 후 경과 시간 (h)', scale=alt.Scale(domain=[0, 72], nice=False))
     tip = [alt.Tooltip('T_H', title='시각(h)'), alt.Tooltip('PROB', title='24시간 안 고장 확률', format='.2f'), '단계']
     if CAUTION:

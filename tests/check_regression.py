@@ -187,6 +187,12 @@ with _tf.TemporaryDirectory() as d:
     with open(Path(d) / 'test_pts.parquet', 'ab') as f:
         f.write(b'0')
     check('바뀐 클라우드용 파일은 불러오지 않는다', raises(lambda: app_data.load(d), ValueError))
+from src.auth import public_by_decision
+with _tf.TemporaryDirectory() as d:
+    f = Path(d) / 'deploy.toml'
+    check('공개 결정은 deploy.toml에 명시했을 때만 (없거나 false면 비공개)', not public_by_decision(f)
+          and (f.write_text('[access]\npublic = false\n') or True) and not public_by_decision(f)
+          and (f.write_text('[access]\npublic = true\n') or True) and public_by_decision(f))
 from src.posko_data import _check_manifest
 check('manifest의 경로 조작 값(../)을 막는다',
       raises(lambda: _check_manifest({'files': [{'id': '../x', 'scenarioId': 'S0001', 'chunks': []}], 'scenarios': []}), ValueError)

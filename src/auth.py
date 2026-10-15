@@ -16,7 +16,8 @@
 - 틀릴 때마다 대기 시간이 늘고(1·2·4·8·16초), 한 세션에서 5번 틀리면 그 세션은 잠긴다.
   새로 고침하면 새 세션이라 횟수가 다시 시작된다 → 무차별 대입을 늦출 뿐 막지는 못하므로 긴 비밀번호와 아래 비공개 앱 설정이 필요하다
 - 클라우드 모드(app_data로 실행)인데 [auth]가 없으면 열지 않는다 (설정을 빠뜨려 공개되는 것을 막는 기본 거부)
-  일부러 공개하려면 Secrets에 [auth] disabled = true 를 명시한다
+  일부러 공개하려면 저장소의 deploy.toml에 [access] public = true 를 커밋하거나(팀 결정 2026-10-15: 공개),
+  Secrets에 [auth] disabled = true 를 넣는다
 - 이 비밀번호는 1차 방어선이다. Streamlit Community Cloud의 '비공개 앱 + 볼 수 있는 사람 이메일 지정'을 함께 쓴다
 """
 
@@ -25,6 +26,10 @@ import hashlib
 import hmac
 import secrets as pysecrets
 import time
+import tomllib
+from pathlib import Path
+
+DEPLOY_FILE = Path(__file__).resolve().parent.parent / 'deploy.toml'
 
 ITERATIONS = 600_000      # OWASP 권장 PBKDF2-HMAC-SHA256 반복 수 (2023~)
 MAX_FAILS = 5
@@ -41,6 +46,14 @@ def verify(password, salt, expected, iterations=ITERATIONS):
     return hmac.compare_digest(digest, expected)
 
 
+def public_by_decision(path=DEPLOY_FILE):
+    """저장소의 deploy.toml에 [access] public = true가 명시돼 있으면 공개 (팀 결정을 커밋으로 남긴다)"""
+    try:
+        return bool(tomllib.loads(Path(path).read_text(encoding='utf-8')).get('access', {}).get('public', False))
+    except (FileNotFoundError, tomllib.TOMLDecodeError):
+        return False
+
+
 def require_login(st, cloud_mode):
     """비밀번호가 맞을 때까지 화면을 막는다. 통과하면 None, 막으면 st.stop()"""
     try:
@@ -48,6 +61,8 @@ def require_login(st, cloud_mode):
     except Exception:          # Secrets 파일이 아예 없을 때
         conf = None
     if conf is None:
+        if cloud_mode and public_by_decision():
+            return             # 팀이 공개로 정함 (deploy.toml)
         if cloud_mode:
             st.error('접속 비밀번호가 설정되지 않아 화면을 열 수 없습니다. 관리자에게 문의하세요.')
             st.stop()

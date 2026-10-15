@@ -28,8 +28,8 @@ fastReruns = true
 #   (CSS로 배경만 바꾸면 버튼·라디오 글자가 배경과 겹쳐 안 보이고, Streamlit 버전이 바뀌면 깨진다)
 base = "dark"
 font = "'Noto Sans KR':https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap"
-baseFontSize = 15
-headingFontSizes = ["1.8rem", "1.4rem", "1.15rem"]
+baseFontSize = 17
+headingFontSizes = ["2rem", "1.6rem", "1.3rem"]
 headingFontWeights = [800, 700, 650]
 primaryColor = "#3B82F6"            # 주 버튼·선택 (화면당 주 버튼 하나)
 backgroundColor = "#080F1C"

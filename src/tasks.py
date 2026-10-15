@@ -248,6 +248,16 @@ class TaskStore:
                                       'outcome': outcome, 'details': details, 'judged': judged, 'confirmed': confirmed,
                                       'completed_at': _now()})
 
+    def cancel(self, task_id):
+        """배정 취소 (설비관리자): 완료 전 작업만 지운다. 그 설비는 다시 '배정할 경보'로 돌아간다.
+        취소 이력은 진행 기록(src/actions.py의 '배정 취소')에 남긴다. 완료된 작업은 먼저 상태를 되돌려야 한다"""
+        if self.path:
+            with self._conn() as c:
+                return c.execute('DELETE FROM tasks WHERE id=? AND completed_h IS NULL', [int(task_id)]).rowcount > 0
+        n = len(self.rows)
+        self.rows = [r for r in self.rows if not (r['id'] == int(task_id) and r['completed_h'] is None)]
+        return len(self.rows) < n
+
     def edit_report(self, task_id, outcome, details, judged, confirmed):
         """완료 보고 고치기 (설비관리자): 이미 완료된 작업만. 완료 시각은 그대로 둔다"""
         details = clean(details, LIMITS['details'])

@@ -29,8 +29,8 @@ from pathlib import Path
 
 import pandas as pd
 
-KINDS = ['승인 요청', '승인', '보류', '작업 시작', '작업 완료', '부품 발주', '점검 결과']
-JOB_KINDS = ['승인 요청', '승인', '보류', '작업 시작', '작업 완료']     # 정비 결정 하나의 진행 단계
+KINDS = ['승인 요청', '승인', '보류', '작업 시작', '작업 완료', '부품 발주', '점검 결과', '배정 취소']
+JOB_KINDS = ['승인 요청', '승인', '보류', '작업 시작', '작업 완료', '배정 취소']     # 정비 결정 하나의 진행 단계 (배정 취소 = 다시 배정 대기)
 ROLES = ['정비 책임자', '현장 작업']
 SPLITS = ['test', 'validation']
 PARTS = ['valve', 'oscillator']
@@ -63,8 +63,8 @@ def validate(row):
     if not 0 <= h <= 72:
         raise ValueError(f'시각 범위 밖: {h}')
     r['시각(h)'] = h
-    if r['종류'] in ('승인', '보류') and r['누가'] != '정비 책임자':
-        raise ValueError('승인·보류는 정비 책임자만')
+    if r['종류'] in ('승인', '보류', '배정 취소') and r['누가'] != '정비 책임자':
+        raise ValueError('승인·보류·배정 취소는 정비 책임자만')
     if r['종류'] == '부품 발주' and r['부품'] not in PARTS:
         raise ValueError(f'모르는 부품: {r["부품"]!r}')
     if r['종류'] == '점검 결과':

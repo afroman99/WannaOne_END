@@ -659,6 +659,16 @@ def assign_box(sid, srow, sstage, job_, dec_i, W, cfg, load):
                           args=('부품 발주', sid, MANAGER), kwargs={'part': part, 'option': '긴급' if empty else '정상'})
 
 
+def cancel_task(tid, sid, title):
+    """배정 취소 (콜백): 완료 전 작업을 지우고 진행 기록에 '배정 취소'를 남긴다"""
+    if TASKS.cancel(tid):
+        LOG.record('배정 취소', split, sid, now, MANAGER, note=f'#{tid} {title}')
+        st.session_state.pop('edit_tid', None)
+        st.toast(f'{sid}: 배정을 취소했습니다. 다시 배정할 수 있습니다', icon=':material/undo:')
+    else:
+        st.toast('완료된 작업이거나 이미 없는 작업입니다', icon=':material/error:')
+
+
 def team_load(tf):
     """팀마다 열린 작업 수 (배정 기본값: 가장 한가한 팀)"""
     o = tf[tf['상태'] != '완료']
@@ -1038,6 +1048,14 @@ else:
                                 st.rerun()
                             except ValueError as err:
                                 st.error(str(err))
+                    # 배정 취소: 실수로 배정했거나 계획이 바뀐 경우. 그 설비는 다시 '배정할 경보'로 돌아간다
+                    st.divider()
+                    if done_:
+                        st.caption('완료된 작업은 배정을 취소할 수 없습니다. 위에서 상태를 대기·진행 중으로 되돌린 뒤 취소하세요.')
+                    else:
+                        sure = st.checkbox(f'#{tid} 배정을 취소합니다 (작업 목록에서 빠지고, 설비는 다시 배정 대기로)', key=f'cancel_ok_{tid}')
+                        st.button('배정 취소', icon=':material/undo:', key=f'cancel_{tid}', disabled=not sure, on_click=cancel_task,
+                                  args=(tid, cur['sid'], cur['title']))
                 st.download_button('작업 이력 CSV', tasks.safe_csv(tf.drop(columns=['split'])), file_name=f'cast_guard_tasks_{split}.csv',
                                    mime='text/csv', icon=':material/download:')
 

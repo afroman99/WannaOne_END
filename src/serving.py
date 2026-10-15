@@ -29,7 +29,7 @@ from src.preprocess import apply_params, build_hourly
 
 MODEL_PATH = Path(__file__).resolve().parent.parent / 'models' / 'risk24.joblib'
 DATA_VERSION = 'pdm-v2.2.0'
-REQUIRED_KEYS = ['model', 'threshold', 'features', 'params', 'final', 'validation']
+REQUIRED_KEYS = ['model', 'threshold', 'features', 'params', 'final', 'validation']   # step_h는 없으면 6시간(예전 형식)
 
 # 특징 이름 → 화면에 보여 줄 묶음 이름
 GROUPS = [
@@ -115,7 +115,7 @@ def _matrix(pts, cols):
 
 
 def score_scenarios(scenario_ids, bundle):
-    """시나리오들의 예측 시점(6시간마다)별 24시간 고장 확률과 경보.
+    """시나리오들의 예측 시점(모델의 예측 간격 step_h마다)별 24시간 고장 확률과 경보.
 
     반환
       pts  예측 시점 표: SCENARIO_ID, OBSERVED_AT, T_H, 특징들, PROB(24시간 안 고장 확률), ALARM(경보 여부)
@@ -126,7 +126,7 @@ def score_scenarios(scenario_ids, bundle):
     if not ids:
         raise ValueError('시나리오가 없다')
     hr = apply_params(build_hourly(ids), bundle['params'])   # 보정값은 학습 세트에서 정한 그대로
-    pts = make_features(hr, make_prediction_points(ids))
+    pts = make_features(hr, make_prediction_points(ids, step_h=bundle.get('step_h', 6)))   # 예전 모델 파일은 6시간
     pts['PROB'] = bundle['model'].predict_proba(_matrix(pts, bundle['features']))[:, 1]
     pts['ALARM'] = pts['PROB'] >= bundle['threshold']
     c = bundle.get('caution')

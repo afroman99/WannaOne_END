@@ -1,7 +1,8 @@
 """테스트 세트(정답 없음) 24시간 고장위험 예측.
 
-04_model.py에서 검증 세트로 평가한 모델을 그대로 쓴다 (보수적 기준: 평가하지 않은 모델은 내보내지 않는다).
+04_model.py·09_hourly.py에서 검증 세트로 평가한 모델을 그대로 쓴다 (보수적 기준: 평가하지 않은 모델은 내보내지 않는다).
 - 모델: src/model.py의 FINAL (랜덤포레스트 · 센서 + 정비 이력), 학습 세트로 학습
+- 예측 간격: src/model.py의 PRED_STEP_H (개선 1부터 1시간. 중간발표 버전은 6시간, git 태그 midterm)
 - 보정값: 학습 세트 정상 시나리오에서 정한 값 (preprocess.fit_params)
 - 임계값: 학습 세트 교차검증에서 점진 고장을 모두 잡고 진짜 오경보가 0인 임계값 중 가장 낮은 것
 - 2단계 경보의 주의 단계: src/model.py의 CAUTION_FINAL(열화 감지 모델)과 06_caution.py와 같은 규칙의 주의 기준
@@ -35,7 +36,7 @@ sys.path.insert(0, str(ROOT))
 from src.evaluate import (CAUTION_MIN_PRECISION, caution_report, caution_sweep, choose_caution_threshold, choose_threshold,
                           degraded_now, evaluate, failure_events, unlabeled_alarms)
 from src.features import build_dataset, make_features, make_prediction_points
-from src.model import CAUTION_FINAL, FEATURES, FINAL, MODELS, fold_features, oof_from_folds
+from src.model import CAUTION_FINAL, FEATURES, FINAL, MODELS, PRED_STEP_H, fold_features, oof_from_folds
 from src.posko_data import load_answer, load_scenarios
 from src.preprocess import EQP, apply_params, build_hourly
 from src.serving import save_bundle
@@ -66,8 +67,8 @@ if not same:
 
 # 2. 학습 세트로 최종 모델 학습, 교차검증으로 임계값
 
-section(f'2. 최종 모델: {FINAL["model"]} · {FINAL["features"]}')
-X, params, hr = build_dataset()
+section(f'2. 최종 모델: {FINAL["model"]} · {FINAL["features"]} · {PRED_STEP_H}시간마다 예측')
+X, params, hr = build_dataset(step_h=PRED_STEP_H)
 train = X[X['SPLIT'] == 'train'].reset_index(drop=True)
 cols = FEATURES[FINAL['features']]
 make_model = MODELS[FINAL['model']]
@@ -95,7 +96,7 @@ print(f'주의 모델: {CAUTION_FINAL["model"]} · {CAUTION_FINAL["features"]} �
 
 section('3. 테스트 세트 예측')
 hr_test = apply_params(build_hourly(test_ids), params)          # 보정값은 학습 세트에서 정한 그대로
-pts = make_prediction_points(test_ids)
+pts = make_prediction_points(test_ids, step_h=PRED_STEP_H)
 Xte = make_features(hr_test, pts)
 prob = model.predict_proba(Xte[cols].values.astype(float))[:, 1]
 
@@ -131,7 +132,7 @@ section('4. 모델 저장')
 res = evaluate(valid.reset_index(drop=True), model.predict_proba(valid[cols].values.astype(float))[:, 1], th)
 ev = res['events'][['SCENARIO_ID', 'WO_NO', 'FAILURE_DT', 'TYPE', '감지', '리드타임(h)']]
 v_ids = valid['SCENARIO_ID'].unique().tolist()
-all_va = make_features(hr[hr['SCENARIO_ID'].isin(v_ids)], make_prediction_points(v_ids))
+all_va = make_features(hr[hr['SCENARIO_ID'].isin(v_ids)], make_prediction_points(v_ids, step_h=PRED_STEP_H))
 ua = unlabeled_alarms(all_va, model.predict_proba(all_va[cols].values.astype(float))[:, 1], th, valid)
 va = valid.reset_index(drop=True)
 c_sum, c_ev = caution_report(va, caution_model.predict_proba(va[c_cols].values.astype(float))[:, 1], c_th,
@@ -139,7 +140,7 @@ c_sum, c_ev = caution_report(va, caution_model.predict_proba(va[c_cols].values.a
 bundle = {
     'caution': {'model': caution_model, 'threshold': c_th, 'features': c_cols, 'final': CAUTION_FINAL,
                 'min_precision': CAUTION_MIN_PRECISION, 'validation': c_sum, 'validation_events': c_ev},
-    'model': model, 'threshold': th, 'features': cols, 'params': params, 'final': FINAL,
+    'model': model, 'threshold': th, 'features': cols, 'params': params, 'final': FINAL, 'step_h': PRED_STEP_H,
     'created_at': pd.Timestamp.now(tz='Asia/Seoul').strftime('%Y-%m-%d %H:%M'),
     'n_train_points': len(train),
     'validation': {'point': res['point'], 'event': res['event'], 'cost': res['cost'],

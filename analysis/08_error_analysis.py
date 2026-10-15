@@ -6,7 +6,8 @@
   S0248  오탐 - 진짜 오경보: 고장 예정이 없는데 울린 경보
   S0277  오탐 - 이른 경보: 고장 24시간보다 일찍 울려 정답상 오경보로 센 경보
   S0235  미탐 - 돌발 고장: 신호 없이 갑자기 고장
-  S0234  미탐 - 늦은 감지: 점진 고장인데 첫 경보가 고장 13.75시간 전
+  S0234  미탐 - 늦은 감지: 점진 고장인데 첫 경보가 고장 16.75시간 전 (중간발표 6시간 예측에서는 13.75시간 전)
+예측 간격은 저장된 모델(models/risk24.joblib)의 step_h를 따른다 (개선 1부터 1시간)
 
 그림 (figures/, 저장소에는 올리지 않음)
   19_error_검증_오탐미탐_시계열.png
@@ -44,7 +45,7 @@ KIND = {'TP': ('#eb5757', 'o', '맞은 경보 (TP)'), 'FP': ('#f2994a', 'X', '�
 bundle = load_bundle()
 ids = [c for c, _ in CASES]
 pts, hr = score_scenarios(ids, bundle)
-X, _, _ = build_dataset()               # 정답 (관측이 끝나 결과를 알 수 없는 시점은 들어 있지 않다)
+X, _, _ = build_dataset(step_h=bundle.get('step_h', 6))   # 모델과 같은 예측 간격의 정답 (결과를 알 수 없는 시점은 없다)
 lab = X[X['SPLIT'] == 'validation'][['SCENARIO_ID', 'T_H', 'risk24', 'RUL_EVENT', 'RUL_HOURS']]
 pts = pts.drop(columns=['risk24', 'RUL_EVENT', 'RUL_HOURS']).merge(lab, on=['SCENARIO_ID', 'T_H'], how='left')
 y = pts['risk24']

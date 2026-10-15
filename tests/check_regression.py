@@ -1,16 +1,17 @@
 """회귀 점검: 코드를 고친 뒤에도 보고서·발표의 숫자와 서비스 동작이 그대로인지 확인한다.
 
     python analysis/05_predict_test.py      # 모델을 다시 만든 경우
-    python tests/check_regression.py        # 약 30초
+    python tests/check_regression.py        # 약 1분
 
 점검 항목 (하나라도 실패하면 종료 코드 1)
   1. 모델 파일: 해시·필수 값·만든 환경(meta)이 맞는가
-  2. 대표 숫자: 경보 기준 0.67, 주의 기준 0.38, 검증 세트 AP 0.860, 고장 감지 14/16, 비용(두 부품) 860
+  2. 대표 숫자: 예측 간격 1시간, 경보 기준 0.56, 주의 기준 0.57, 검증 세트 AP 0.866, 고장 감지 14/16, 비용(두 부품) 1020
   3. 서비스 예측: 대시보드 경로(serving.score_scenarios)의 테스트 세트 예측이 predictions/test_risk24.csv와 같은가
-     (테스트 경보 83개 시점, 경보 시나리오 18개)
+     (테스트 5,028개 시점 중 경보 554개, 경보 시나리오 18개)
   4. 경보 이유: 랜덤포레스트 기여도의 기준값 + 합이 위험 확률과 같은가
-  5. 비용 곡선: 대시보드 비용 계산기가 평가 함수(src/evaluate.py)와 같은 비용을 내는가 (손익분기 0.67)
+  5. 비용 곡선: 대시보드 비용 계산기가 평가 함수(src/evaluate.py)와 같은 비용을 내는가 (손익분기 0.60)
   6. 안전장치: 모르는 정비 유형, 빠진 특징, 바뀐 모델 파일을 조용히 넘기지 않고 멈추는가
+  7. 1시간 정답: make_targets_hourly가 6시간 시점에서 정답 파일 기준(make_targets)과 같은가
 
 숫자를 일부러 바꾼 경우(모델 개선 등)에는 보고서를 고친 뒤 EXPECTED도 함께 고친다.
 """
@@ -26,14 +27,15 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from src.features import _maintenance_features
+from src.features import _maintenance_features, make_targets, make_targets_hourly
 from src.posko_data import load_scenarios
 from src.serving import MODEL_PATH, _forest_contributions, _matrix, cost_curve, explain, load_bundle, score_scenarios
 
-# 결과보고서·발표자료에 나오는 숫자 (2026-10-13 확정)
+# 대표 숫자. 중간발표(git 태그 midterm, 6시간 예측): 경보 0.67, 주의 0.38, AP 0.860, 비용 860, 손익분기 0.67, 테스트 833시점·경보 83
+# 개선 1(2026-10-15, 1시간 예측, analysis/09_hourly.py)부터 아래 값
 EXPECTED = {
-    'threshold': 0.67, 'caution_threshold': 0.38, 'AP': 0.860, '감지': 14, '고장': 16, '비용 두 부품': 860,
-    'test_points': 833, 'test_alarms': 83, 'test_alarm_scenarios': 18, 'breakeven_p': 0.67,
+    'threshold': 0.56, 'caution_threshold': 0.57, 'AP': 0.866, '감지': 14, '고장': 16, '비용 두 부품': 1020,
+    'test_points': 5028, 'test_alarms': 554, 'test_alarm_scenarios': 18, 'breakeven_p': 0.60, 'step_h': 1,
 }
 
 results = []
@@ -64,6 +66,7 @@ check('만든 환경(meta)이 있고 지금 환경과 같다 (경고 없음)', '
 
 print('\n2. 대표 숫자')
 v = bundle['validation']
+check('예측 간격', bundle.get('step_h', 6) == EXPECTED['step_h'], f'{bundle.get("step_h", 6)}시간')
 check('경보 기준', round(bundle['threshold'], 2) == EXPECTED['threshold'], f'{bundle["threshold"]:.2f}')
 check('주의 기준', round(bundle['caution']['threshold'], 2) == EXPECTED['caution_threshold'],
       f'{bundle["caution"]["threshold"]:.2f}')
@@ -129,6 +132,18 @@ with tempfile.TemporaryDirectory() as d:
     with open(copy, 'ab') as f:
         f.write(b'0')
     check('저장 뒤 바뀐 모델 파일은 불러오지 않는다', raises(lambda: load_bundle(copy), ValueError))
+
+print('\n7. 1시간 정답')
+known = load_scenarios().query('SPLIT != "test"')['SCENARIO_ID'].tolist()
+ref, hourly = make_targets(known), make_targets_hourly(known, step_h=1)
+m = ref.merge(hourly, on=['SCENARIO_ID', 'OBSERVED_AT'], how='left', suffixes=('', '_h'))
+check('6시간 시점이 모두 1시간 정답에 있다', m['risk24_h'].notna().all(), f'{len(ref)}개')
+check('정답·잔여수명이 같다', (m['risk24'] == m['risk24_h']).all() and (m['RUL_EVENT'] == m['RUL_EVENT_h']).all()
+      and np.allclose(m['RUL_HOURS'].fillna(-1), m['RUL_HOURS_h'].fillna(-1)), f'1시간 정답 {len(hourly)}개')
+h6 = make_targets_hourly(known, step_h=6)
+check('6시간 간격으로 만들면 정답 파일 기준과 똑같다 (잔여수명은 부동소수 오차 안)',
+      h6.drop(columns='RUL_HOURS').equals(ref.drop(columns='RUL_HOURS'))
+      and np.allclose(h6['RUL_HOURS'].fillna(-1), ref['RUL_HOURS'].fillna(-1)))
 
 n_fail = sum(not ok for _, ok in results)
 print(f'\n결과: {len(results) - n_fail}/{len(results)}개 통과')

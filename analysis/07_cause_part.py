@@ -182,7 +182,7 @@ print('     정비 불량이나 부품 불량일 때만 생긴다(팀원 현장 
 
 section('4. 참고: 규칙의 비용 효과 (검증 세트, 데이터에만 맞는 규칙이라 채택하지 않음)')
 bundle = load_bundle()
-X, _, _ = build_dataset()
+X, _, _ = build_dataset(step_h=bundle.get('step_h', 6))   # 모델과 같은 예측 간격
 valid = X[X['SPLIT'] == 'validation'].reset_index(drop=True)
 ev_va = failure_events(valid['SCENARIO_ID'].unique().tolist())
 prob = bundle['model'].predict_proba(valid[bundle['features']].values.astype(float))[:, 1]

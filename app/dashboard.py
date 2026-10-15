@@ -71,6 +71,7 @@ except ValueError as e:   # 저장 뒤 바뀐 파일, 빠진 값
     st.error(f'모델 파일을 쓸 수 없습니다. 터미널에서 `python analysis/05_predict_test.py`로 다시 만드세요.\n\n{e}')
     st.stop()
 TH = bundle['threshold']
+STEP = bundle.get('step_h', 6)           # 예측 간격(시간). 예전 모델 파일은 6시간
 CAUTION = bundle.get('caution')          # 주의 모델이 없는 예전 모델 파일이면 경보 1단계만 보여 준다
 CTH = CAUTION['threshold'] if CAUTION else None
 
@@ -121,8 +122,12 @@ def status_table():
     if CAUTION:
         t['열화 확률'] = last['DEGRADED_PROB']
     t['마지막 예측 (h)'] = last['T_H']
-    t['상태'] = np.select([t.index.isin(in_mnt), t.index.isin(stale)], ['정비 중', '정비 후 예측 대기'],
-                         default=last['STAGE'].reindex(t.index).fillna('정상'))
+    # 경보 유지: 마지막 정비 시작 이후 한 번이라도 경보였으면, 지금 확률이 내려가도 정비 전까지 경보로 둔다
+    since = after_last_maintenance(pts_now, 'T_H')
+    latched = set(since.loc[since['ALARM'], 'SCENARIO_ID']) - set(last.index[last['ALARM']])
+    stage = last['STAGE'].reindex(t.index).fillna('정상').where(~t.index.isin(latched), '경보')
+    t['상태'] = np.select([t.index.isin(in_mnt), t.index.isin(stale)], ['정비 중', '정비 후 예측 대기'], default=stage)
+    t['경보 유지'] = np.where(t.index.isin(latched) & (t['상태'] == '경보'), '유지 (확률 내려감)', '')
     t.loc[t['상태'].isin(['정비 중', '정비 후 예측 대기']), ['위험 확률', '열화 확률'] if CAUTION else ['위험 확률']] = np.nan
     if CAUTION:
         t['첫 주의 (h)'] = first_caution
@@ -163,8 +168,9 @@ if page == '전체 현황':
     c2.metric('지금 경보 (WARNING)', n_alarm)
     c3.metric('지금 주의 (CAUTION)', n_caution if CAUTION else '—', help=None if CAUTION else '주의 모델이 없는 모델 파일입니다')
     c4.metric('정비 중·예측 대기', int(t['상태'].isin(['정비 중', '정비 후 예측 대기']).sum()))
-    st.caption((f'두 확률은 6시간마다 계산합니다. **주의 (CAUTION, 열화 감지)**: 지금 열화 중일 확률 ≥ {CTH:.2f} · ' if CAUTION else '위험 확률은 6시간마다 계산합니다. ')
+    st.caption((f'두 확률은 {STEP}시간마다 계산합니다. **주의 (CAUTION, 열화 감지)**: 지금 열화 중일 확률 ≥ {CTH:.2f} · ' if CAUTION else f'위험 확률은 {STEP}시간마다 계산합니다. ')
                + f'**경보 (WARNING, 24시간 고장 위험)**: 24시간 안 고장 확률(위험 확률) ≥ {TH:.2f}. '
+               '**경보 유지**: 경보가 한 번 켜지면 확률이 내려가도 정비가 시작될 때까지 경보로 둡니다(경보가 켜졌다 꺼졌다 하지 않게). '
                '가장 많이 벗어난 신호는 마지막 1시간 기준이며, 표준화 점수 1이 정상 범위의 경계입니다.')
 
     if CAUTION:
@@ -218,6 +224,8 @@ elif page == '설비 상세':
             '- 교체에 4시간이 걸리므로, 늦어도 고장 예상 4시간 전에는 교체를 시작해야 합니다.\n'
             '- 센서로는 원인 부품(진동장치·밸브)을 구분할 수 없습니다. 두 부품을 모두 점검하세요.\n'
             '- 고장 원인과 상관없이 같은 신호가 오르므로, 아래 신호 흐름으로 열화가 계속되는지 확인하세요.')
+        if row['경보 유지']:
+            st.caption('지금 확률은 경보 기준보다 낮지만, 이번 운전 구간에서 이미 경보가 켜져 정비 전까지 경보로 유지합니다.')
     elif row['상태'] == CAU:
         st.warning(
             '**조치 안내 · 주의** · 열화가 시작된 것으로 보입니다. 아직 24시간 안 고장 위험은 낮습니다.\n'
@@ -226,7 +234,7 @@ elif page == '설비 상세':
             f'- 주의 중 일부는 열화가 아닌 헛걸음입니다(검증 세트 {CAUTION["validation"]["주의 묶음"]}번 중 '
             f'{CAUTION["validation"]["열화 아닌 설비의 주의"]}번). 점검에서 이상이 없으면 그대로 운전합니다.')
     elif row['상태'] in ('정비 중', '정비 후 예측 대기'):
-        st.warning('정비가 시작돼 정비 전 예측은 더 이상 쓰지 않습니다. 재가동 뒤 다음 예측 시점(6시간마다)에 다시 예측합니다.')
+        st.warning(f'정비가 시작돼 정비 전 예측은 더 이상 쓰지 않습니다. 재가동 뒤 다음 예측 시점({STEP}시간마다)에 다시 예측합니다.')
     else:
         st.success('지금은 열화 신호가 없고, 24시간 안 고장 위험이 낮습니다.' if CAUTION else '지금은 24시간 안 고장 위험이 낮습니다.')
 
@@ -295,7 +303,7 @@ elif page == '설비 상세':
                 st.write(f'최종 모델({bundle["final"]["model"]})은 특징별 기여도를 계산할 수 없는 종류입니다. '
                          '왼쪽의 신호 상태와 위의 신호 흐름으로 경보 이유를 확인하세요.')
             elif cp.empty:
-                st.write('아직 예측이 없습니다. 정비가 시작되면 정비 전 예측은 쓰지 않고, 재가동 뒤 다음 예측 시점(6시간마다)을 기다립니다.')
+                st.write(f'아직 예측이 없습니다. 정비가 시작되면 정비 전 예측은 쓰지 않고, 재가동 뒤 다음 예측 시점({STEP}시간마다)을 기다립니다.')
             else:
                 cr = contrib.loc[cp.index[-1]].rename('기여도').reset_index().rename(columns={'index': '묶음'})
                 st.altair_chart(alt.Chart(cr).mark_bar().encode(
@@ -316,7 +324,7 @@ elif page == '모델 정보':
     v = bundle['validation']
     st.header('모델 정보와 검증 세트 성능')
     st.markdown(
-        f'- **모델**: {bundle["final"]["model"]} · 특징 {len(bundle["features"])}개 ({bundle["final"]["features"]})\n'
+        f'- **모델**: {bundle["final"]["model"]} · 특징 {len(bundle["features"])}개 ({bundle["final"]["features"]}) · {STEP}시간마다 예측\n'
         f'- **학습**: 학습 세트 216개 시나리오의 예측 시점 {bundle["n_train_points"]:,}개\n'
         f'- **경보 기준**: 24시간 안 고장 확률 ≥ {TH:.2f}. 학습 세트 교차검증에서 '
         '점진 고장을 모두 잡고 진짜 오경보가 0인 값 중 가장 낮은 값(오경보 없이 가장 일찍 경보)\n'
@@ -368,7 +376,8 @@ else:
     st.markdown(
         f'검증 세트 결과(고장 {v["고장"]}건 중 {n["n_det"]}건 감지, 고장과 무관한 교체 {n["n_needed"]}번, '
         f'진짜 오경보 {n["n_false"]}번)에 데이터셋 비용 규칙을 적용합니다.\n'
-        '- 경보가 나면 바로 교체합니다. 한 부품만 바꾸는데 틀리면, 불필요 정비가 되고 고장도 못 막습니다.\n'
+        '- 경보가 나면 바로 교체합니다(정책: 경보 즉시 교체). 한 부품만 바꾸는데 틀리면, 불필요 정비가 되고 고장도 못 막습니다.\n'
+        '- 정기 교체 직전에 울린 맞는 경보도 교체 한 번으로 셉니다. 예정 교체와 묶어 처리하면 이 비용은 줄어듭니다(의사결정 지원, 다음 단계).\n'
         '- 센서로는 원인 부품을 구분할 수 없어(EDA E9), 부품을 맞힐 확률은 현장 점검 능력에 달려 있습니다.')
     p = st.slider('원인 부품을 맞힐 확률', 0.5, 1.0, 0.5, step=0.01,
                   help='0.5 = 둘 중 하나를 찍음, 1.0 = 항상 맞힘')

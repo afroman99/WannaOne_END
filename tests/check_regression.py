@@ -301,6 +301,30 @@ _rep = (ROOT / 'reports' / '연주_조기경보_결과보고서.md').read_text(e
 check('결과보고서 12-1절 표가 src/limitations.py와 같다 (대시보드와 같은 목록)', _lim_md() in _rep)
 check('한계마다 지금 대응과 추가 대응이 있다', all(r['지금 대응'] and r['추가 대응'] and r['중요도'] in ('높음', '중간', '낮음') for r in LIMITS))
 
+print('\n13. 작업 지시 (팀원 설계와 합침: 배정·시작·완료 보고)')
+from src import tasks as _tk
+for _name, _path in [('세션', None), ('SQLite', Path(_tf.mkdtemp()) / 't.sqlite3')]:
+    _s = _tk.TaskStore(_path)
+    _a = _s.add('test', 'S0294', 'S0294 지금 두 부품 교체', '정비 1팀', '긴급', 72, 72, 'g', 'r', '지금 두 부품 교체')
+    _b = _s.add('test', 'S0294', '중복', '정비 2팀', '높음', 72, 72, 'g', 'r')
+    _c = _s.add('test', 'S0294', '과거에 끼워 넣기', '정비 2팀', '보통', 10, 10, 'g', 'r')
+    _tid = int(_s.frame('test', 72).iloc[0]['id'])
+    _no_detail = raises(lambda: _s.complete(_tid, 72, '이상 발견', '  ', 'valve', 'valve'), ValueError)
+    _s.start(_tid, 72)
+    _done = _s.complete(_tid, 73, '이상 발견', '=HYPERLINK(1)', 'valve', 'valve')
+    _again = _s.complete(_tid, 73, '이상 발견', 'x', 'valve', 'valve')
+    check(f'작업 지시({_name}): 같은 설비 중복 배정 차단, 수행 내용 없이는 완료 불가, 두 번 완료 불가',
+          _a and not _b and not _c and _no_detail and _done and not _again)
+    check(f'작업 지시({_name}): 재생 시각 기준 상태 (72h 진행 전 대기, 73h 완료, 50h에는 아직 없음)',
+          _s.frame('test', 72).iloc[0]['상태'] == '진행 중' and _s.frame('test', 73).iloc[0]['상태'] == '완료'
+          and _s.frame('test', 50).empty)
+    check(f'작업 지시({_name}): 내려받는 CSV의 수식 주입을 막는다', "'=HYPERLINK" in _tk.safe_csv(_s.frame('test', 73)).decode('utf-8-sig'))
+check('작업 지시: 정해진 팀·우선순위가 아니면 배정하지 않는다',
+      raises(lambda: _tk.TaskStore(None).add('test', 'S0294', 't', '외부 업체', '긴급', 1, 1, '', ''), ValueError)
+      and raises(lambda: _tk.TaskStore(None).add('test', '../x', 't', '정비 1팀', '긴급', 1, 1, '', ''), ValueError))
+check('작업 지시 SQLite 파일은 커밋되지 않는다 (actions/ 무시)',
+      __import__('subprocess').run(['git', 'check-ignore', '-q', 'actions/tasks.sqlite3'], cwd=ROOT).returncode == 0)
+
 n_fail = sum(not ok for _, ok in results)
 print(f'\n결과: {len(results) - n_fail}/{len(results)}개 통과')
 sys.exit(1 if n_fail else 0)

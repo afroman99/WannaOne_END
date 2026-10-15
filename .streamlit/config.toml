@@ -24,21 +24,26 @@ gatherUsageStats = false
 fastReruns = true
 
 [theme]
-# 가독성 (팀원 피드백 2026-10-15): 한글 글꼴을 지정하고, 제목 크기를 줄이고, 상태 색을 의미에 맞춘다
-base = "light"
+# CAST GUARD AI (팀원 설계와 합침, 2026-10-15): 어두운 배경과 팀원 색을 CSS 대신 테마로 지정한다
+#   (CSS로 배경만 바꾸면 버튼·라디오 글자가 배경과 겹쳐 안 보이고, Streamlit 버전이 바뀌면 깨진다)
+base = "dark"
 font = "'Noto Sans KR':https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap"
 baseFontSize = 15
-headingFontSizes = ["1.9rem", "1.45rem", "1.2rem"]
-headingFontWeights = [700, 700, 600]
-primaryColor = "#2f5d8a"            # 강철 파랑: 선택된 버튼·슬라이더
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f3f5f7"
-textColor = "#1d2329"
-borderColor = "#dde1e5"
-redColor = "#c23b3b"                # 경보·즉시 조치
-orangeColor = "#c98a12"             # 주의
-greenColor = "#2e7d4f"              # 정상·충족
-blueColor = "#2f5d8a"
-grayColor = "#6b7480"
-baseRadius = "0.5rem"
-dataframeHeaderBackgroundColor = "#eef1f4"
+headingFontSizes = ["1.8rem", "1.4rem", "1.15rem"]
+headingFontWeights = [800, 700, 650]
+primaryColor = "#3B82F6"            # 주 버튼·선택 (화면당 주 버튼 하나)
+backgroundColor = "#080F1C"
+secondaryBackgroundColor = "#101D30"  # 카드·입력칸·표 머리
+textColor = "#EDF4FF"
+borderColor = "#263850"
+linkColor = "#60A5FA"
+redColor = "#FF667A"                # 경보·즉시 조치
+orangeColor = "#F7B955"             # 주의
+greenColor = "#2DD4A0"              # 정상·충족
+blueColor = "#60A5FA"
+violetColor = "#A78BFA"
+grayColor = "#9AAFCB"
+baseRadius = "0.75rem"
+buttonRadius = "0.6rem"
+showWidgetBorder = true
+dataframeHeaderBackgroundColor = "#16263D"

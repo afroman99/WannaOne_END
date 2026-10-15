@@ -319,9 +319,20 @@ for _name, _path in [('세션', None), ('SQLite', Path(_tf.mkdtemp()) / 't.sqlit
           _s.frame('test', 72).iloc[0]['상태'] == '진행 중' and _s.frame('test', 73).iloc[0]['상태'] == '완료'
           and _s.frame('test', 50).empty)
     check(f'작업 지시({_name}): 내려받는 CSV의 수식 주입을 막는다', "'=HYPERLINK" in _tk.safe_csv(_s.frame('test', 73)).decode('utf-8-sig'))
+    _fix = _s.edit_report(_tid, '추가 점검 필요', '보고 고침', 'oscillator', 'oscillator')
+    _row = _s.frame('test', 73).iloc[0]
+    _open = _s.add('test', 'S0300', 't', '정비 1팀', '보통', 73, 73, 'g', 'r')
+    _open_id = int(_s.frame('test', 73).query('sid == "S0300"').iloc[0]['id'])
+    check(f'작업 지시({_name}): 완료된 작업의 보고를 고칠 수 있고(완료 시각 유지), 완료 전 작업은 보고 수정 불가',
+          _fix and _row['outcome'] == '추가 점검 필요' and _row['confirmed'] == 'oscillator' and _row['completed_h'] == 73
+          and not _s.edit_report(_open_id, '이상 발견', 'x', 'valve', 'valve'))
 check('작업 지시: 정해진 팀·우선순위가 아니면 배정하지 않는다',
       raises(lambda: _tk.TaskStore(None).add('test', 'S0294', 't', '외부 업체', '긴급', 1, 1, '', ''), ValueError)
       and raises(lambda: _tk.TaskStore(None).add('test', '../x', 't', '정비 1팀', '긴급', 1, 1, '', ''), ValueError))
+_lg = _ac.ActionLog(None)
+_lg.record('점검 결과', 'test', 'S0294', 70, '현장 작업', judged='valve', confirmed='valve')
+_lg.record('점검 결과', 'test', 'S0294', 70, '정비 책임자', judged='valve', confirmed='oscillator', note='완료 보고 수정')
+check('완료 보고를 고치면 점검 되먹임은 마지막 보고만 센다', _lg.inspection_accuracy() == (1, 0.0))
 check('작업 지시 SQLite 파일은 커밋되지 않는다 (actions/ 무시)',
       __import__('subprocess').run(['git', 'check-ignore', '-q', 'actions/tasks.sqlite3'], cwd=ROOT).returncode == 0)
 

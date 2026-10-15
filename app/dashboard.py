@@ -21,6 +21,7 @@
 """
 
 import html
+import re
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -29,7 +30,6 @@ import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -129,6 +129,73 @@ with st.container(horizontal=True, vertical_alignment='center', gap='medium'):
         show_truth = st.toggle('정답 보기 (검증 세트)', key='truth', disabled=split != 'validation',
                                help='앞으로 일어날 실제 고장 시각(정답)을 겹쳐 봅니다. 모델은 이 정보를 보지 않습니다.') and split == 'validation'
         st.caption('독립된 합성 시나리오를 재생합니다 · 실시간 설비 연결 아님')
+# 주소(URL)와 화면 위치를 맞춘다 → 브라우저·마우스의 뒤로 가기/앞으로 가기가 된다
+#   ?view=m (설비관리자) &page=설비 상세|정책·비용|... (관리자 하위 페이지) 또는 equip (작업자 설비 상세) &sid=S0294
+#   Streamlit은 st.query_params를 바꾸면 기록을 하나 쌓고(pushState), 뒤로 가기로 주소가 바뀌면 그 주소로 다시 실행한다.
+#   그래서 주소가 '우리가 마지막으로 쓴 주소'와 다를 때만(뒤로·앞으로 가기, 주소 직접 입력) 주소 → 화면으로 옮기고,
+#   나머지 경우는 맨 아래 sync_url()이 화면 → 주소로 쓴다. 기본 화면(작업자·내 작업)은 주소에 아무것도 넣지 않는다.
+def url_state():
+    return {k: v for k, v in st.query_params.to_dict().items() if k in ('view', 'page', 'sid')}
+
+
+def apply_url():
+    q = url_state()
+    if q == st.session_state.get('_nav_last', {}):
+        return
+    st.session_state['_nav_last'] = q
+    role_ = MANAGER if q.get('view') == 'm' else WORKER
+    page_ = q.get('page')
+    sid_ = q.get('sid') if re.fullmatch(r'S\d{4}', q.get('sid', '')) else None
+    before = (st.session_state.get('role'), st.session_state.get('msub'), st.session_state.get('wview'))
+    st.session_state['role'] = role_
+    if role_ == MANAGER:
+        if page_ in MANAGER_TABS:
+            st.session_state['msub'] = page_
+        else:
+            st.session_state.pop('msub', None)
+    else:
+        st.session_state.pop('msub', None)
+        st.session_state['wview'] = '설비 상세' if page_ == 'equip' else '내 작업'
+    if sid_:
+        st.session_state['sid'] = sid_
+        if role_ == MANAGER and page_ not in MANAGER_TABS:
+            st.session_state['decision_sid'] = sid_
+            st.session_state['nav_pick'] = True
+    elif role_ == MANAGER and page_ not in MANAGER_TABS:
+        st.session_state.pop('nav_pick', None)
+        st.session_state.pop('decision_sid', None)
+    if before != (st.session_state.get('role'), st.session_state.get('msub'), st.session_state.get('wview')):
+        st.session_state['scroll_top'] = True
+
+
+def sync_url():
+    """지금 화면 위치를 주소에 쓴다 (바뀌었을 때만 → 브라우저 기록 한 칸)"""
+    q = {}
+    if st.session_state.get('role') == MANAGER:
+        q['view'] = 'm'
+        if st.session_state.get('msub') in MANAGER_TABS:
+            q['page'] = st.session_state['msub']
+            if st.session_state['msub'] == '설비 상세' and st.session_state.get('sid'):
+                q['sid'] = st.session_state['sid']
+        elif st.session_state.get('nav_pick') and st.session_state.get('decision_sid'):
+            q['sid'] = st.session_state['decision_sid']
+    elif st.session_state.get('wview') == '설비 상세':
+        q['page'] = 'equip'
+        if st.session_state.get('sid'):
+            q['sid'] = st.session_state['sid']
+    if q != url_state():
+        st.query_params.from_dict(q)
+    st.session_state['_nav_last'] = q
+
+
+def pick_equipment(sid):
+    """설비를 고른다 (설비관리자 목록·맨 위 카드): 비용 비교·배정·설비 페이지가 이 설비로, 주소에도 남긴다"""
+    st.session_state.update({'decision_sid': sid, 'sid': sid, 'nav_pick': True})
+
+
+apply_url()
+
+
 def close_sub():
     """설비관리자 하위 페이지에서 나오기 (역할을 바꿀 때도)"""
     if st.session_state.pop('msub', None):
@@ -457,6 +524,7 @@ def go_detail(sid):
         st.session_state['msub'] = '설비 상세'
 
 
+SHOW_SUBPAGE_LIST = False   # 설비관리자 ③ 하위 페이지 목록 (2026-10-15 사용자 요청으로 숨김. 설비 페이지는 비용 비교 제목 옆 버튼으로 들어감)
 PLAN_GUESS_H = 12   # 정기 교체 계획이 없을 때 비용 비교에만 쓰는 '계획 정비' 시점 (가정값, 추천에는 안 씀)
 STAGE_DOT = {'경보': 'red', '주의': 'orange', '정상': 'green', '정비 중': 'gray', '정비 후 예측 대기': 'gray'}   # 설비 목록 상태 점 색
 
@@ -736,10 +804,10 @@ else:
     # 하위 페이지 (노션처럼): 설비 상세·정책·비용·부품 손익·모델 정보는 목록에서 눌러야 들어가고, 위의 경로로 돌아온다
     sub = st.session_state.get('msub')
     if st.session_state.pop('scroll_top', False):    # 페이지를 바꾸면 맨 위(경로)부터 보이게
-        components.html('<script>const d = window.parent.document;'
-                        '["[data-testid=stMain]", "[data-testid=stAppViewContainer]", "section.main"]'
-                        '.forEach(q => { const e = d.querySelector(q); if (e) e.scrollTo(0, 0); });'
-                        'window.parent.scrollTo(0, 0);</script>', height=0)
+        st.iframe('<script>const d = window.parent.document;'
+                  '["[data-testid=stMain]", "[data-testid=stAppViewContainer]", "section.main"]'
+                  '.forEach(q => { const e = d.querySelector(q); if (e) e.scrollTo(0, 0); });'
+                  'window.parent.scrollTo(0, 0);</script>', height=1)   # 고정된 글(사용자 입력 없음)만 넣는다
     if sub in MANAGER_TABS:
         with st.container(horizontal=True, vertical_alignment='center', gap='small'):
             st.button('정비 의사결정', icon=':material/arrow_back:', type='tertiary', key='sub_back', on_click=close_sub)
@@ -788,7 +856,7 @@ else:
                 st.markdown(f'기대 총비용 **{fmt_cost(fb_["기대 총비용"], costs)}** · 완료 전 고장 확률 **{fb_["고장 확률"]:.2f}** '
                             f'(안전 기준 {cfg.safety_max:.2f}) · {r["다음 정기 교체"]} · 예비 재고 {stock_text(W["stock"][fsid])}')
                 st.button('이 설비 판단하기', icon=':material/arrow_downward:', key='cta_open',
-                          on_click=lambda s_=fsid: st.session_state.update({'decision_sid': s_, 'sid': s_}))
+                          on_click=pick_equipment, args=(fsid,))
                 st.caption('누르면 아래 ①에 이 설비의 비용 비교가 열리고, 그 바로 아래에서 배정합니다.')
             else:
                 st.markdown('##### :material/check_circle: 지금 배정할 경보가 없습니다')
@@ -822,7 +890,7 @@ else:
                                                    f'{p_:.0%}' if pd.notna(p_) else '', job] if v)
                     st.button(label, key=f'pick_{x}', width='stretch',
                               type='primary' if x == st.session_state['decision_sid'] else 'secondary',
-                              on_click=lambda s=x: st.session_state.update({'decision_sid': s, 'sid': s}))
+                              on_click=pick_equipment, args=(x,))
         sid = st.session_state['decision_sid']
         srow = t.loc[sid]
         sstage = srow['상태'].split(' (')[0]
@@ -887,7 +955,8 @@ else:
                                 f'- 고장 시 손실: **{fmt_cost(costs.failure_loss, costs)}**\n'
                                 f'- 안전 기준(완료 전 고장 확률): **{cfg.safety_max:.2f}** · 다음 정기 교체: **{r_["다음 정기 교체"]}**\n'
                                 f'- 예비 재고: **{stock_text(W["stock"][sid])}** · 첫 경보 뒤 **{e["elapsed"]:.0f}시간** 지남')
-                    st.caption('가정값은 아래 ③ 하위 페이지 "정책·비용"에서 바꿉니다. 바꾸면 모든 설비에 같이 적용됩니다.')
+                    st.caption(('가정값은 아래 ③ 하위 페이지 "정책·비용"에서 바꿉니다. 바꾸면 모든 설비에 같이 적용됩니다.' if SHOW_SUBPAGE_LIST
+                                else '지금 가정값(기본값)으로 계산했습니다.'))
                 with st.expander('비용 계산 근거', icon=':material/calculate:'):
                     st.markdown('  \n'.join(f'- **{o["선택지"]}**: 고장 확률 P {o["고장 확률"]:.2f} · {o["근거"]}' for o in e['opts'])
                                 + f'  \n- **24시간 조치 안 함**: 앞으로 24시간 안 고장 확률 {p24:.2f} × 고장 시 손실'
@@ -918,26 +987,45 @@ else:
                 column_config={'예정 (h)': st.column_config.NumberColumn(format='%d')})
             with st.container(horizontal=True):
                 with st.popover('작업 수정', icon=':material/edit:'):
-                    opn = tf[tf['상태'] != '완료']
-                    if opn.empty:
-                        st.caption('고칠 열린 작업이 없습니다.')
-                    else:
-                        tid = st.selectbox('작업', opn['id'].tolist(), format_func=lambda i: f'#{i} · ' + opn.set_index('id').loc[i, 'title'])
-                        cur = opn.set_index('id').loc[tid]
-                        with st.form('edit_task', border=False):
-                            e_team = st.selectbox('담당 팀', list(tasks.TEAMS), index=list(tasks.TEAMS).index(cur['team']))
-                            e_prio = st.selectbox('우선순위', tasks.PRIORITIES, index=tasks.PRIORITIES.index(cur['priority']))
-                            e_due = st.number_input('시작 예정 (h)', 0.0, 240.0, float(cur['due_h']), 1.0)
-                            e_guide = st.text_area('점검 가이드', value=cur['guide'], max_chars=tasks.LIMITS['guide'])
-                            e_reason = st.text_area('추천 이유', value=cur['reason'], max_chars=tasks.LIMITS['reason'])
-                            if st.form_submit_button('수정 저장'):
+                    # 완료된 작업도 고칠 수 있다 (완료 보고: 결과·부품·수행 내용). 고친 내용은 점검 결과로 다시 기록해 되먹임에 반영
+                    tfi = tf.set_index('id')
+                    tid = st.selectbox('작업', tf['id'].tolist(), key='edit_tid',
+                                       format_func=lambda i: f'#{i} · {tfi.loc[i, "title"]} · {tfi.loc[i, "상태"]}')
+                    cur = tfi.loc[tid]
+                    done_ = cur['상태'] == '완료'
+                    with st.form(f'edit_task_{tid}', border=False):
+                        e_team = st.selectbox('담당 팀', list(tasks.TEAMS), index=list(tasks.TEAMS).index(cur['team']))
+                        e_prio = st.selectbox('우선순위', tasks.PRIORITIES, index=tasks.PRIORITIES.index(cur['priority']))
+                        e_due = st.number_input('시작 예정 (h)', 0.0, 240.0, float(cur['due_h']), 1.0, format='%.0f')
+                        e_guide = st.text_area('점검 가이드', value=cur['guide'], max_chars=tasks.LIMITS['guide'])
+                        e_reason = st.text_area('추천 이유', value=cur['reason'], max_chars=tasks.LIMITS['reason'])
+                        if done_:
+                            st.markdown(f'**완료 보고** (완료 {cur["completed_h"]:.0f}시간)')
+                            pick = lambda opts, v, d: opts.index(v) if v in opts else opts.index(d)
+                            e_out = st.selectbox('작업 결과', tasks.OUTCOMES, index=pick(tasks.OUTCOMES, cur['outcome'], '이상 발견'))
+                            e_jud = st.selectbox('점검으로 판단한 부품', tasks.JUDGED, index=pick(tasks.JUDGED, cur['judged'], '구분 못함'),
+                                                 format_func=lambda x: PART_NAMES.get(x, x))
+                            e_con = st.selectbox('교체 뒤 확인된 원인 부품', tasks.CONFIRMED,
+                                                 index=pick(tasks.CONFIRMED, cur['confirmed'], '아직 모름'), format_func=lambda x: PART_NAMES.get(x, x))
+                            e_det = st.text_area('수행 내용', value=cur['details'], max_chars=tasks.LIMITS['details'])
+                        if st.form_submit_button('수정 저장', type='primary'):
+                            try:
                                 TASKS.edit(tid, e_team, e_prio, e_due, e_guide, e_reason)
+                                if done_:
+                                    TASKS.edit_report(tid, e_out, e_det, e_jud, e_con)
+                                    if (e_out, e_jud, e_con) != (cur['outcome'], cur['judged'], cur['confirmed']):
+                                        LOG.record('점검 결과', split, cur['sid'], float(cur['completed_h']), MANAGER, judged=e_jud,
+                                                   confirmed=e_con, note=f'완료 보고 수정 #{tid}: {e_out}')
+                                st.toast(f'#{tid} 수정했습니다', icon=':material/check_circle:')
                                 st.rerun()
+                            except ValueError as err:
+                                st.error(str(err))
                 st.download_button('작업 이력 CSV', tasks.safe_csv(tf.drop(columns=['split'])), file_name=f'cast_guard_tasks_{split}.csv',
                                    mime='text/csv', icon=':material/download:')
 
-        st.markdown('#### ③ 하위 페이지')
         st.session_state.setdefault('sid', sid)
+    if sub not in MANAGER_TABS and SHOW_SUBPAGE_LIST:
+        st.markdown('#### ③ 하위 페이지')
         with st.container(border=True, gap='small'):
             for key_, label_ in [('설비 상세', f'{sid} 설비 상세 — 위험 확률·네 신호·정비 이력'),
                                  ('정책·비용', '정책·비용 — 가정값, 전체 정비 결정과 근거'),
@@ -1434,3 +1522,7 @@ elif page == '비용 계산기':
                                                 range=[LINE_BLUE, LINE_GREEN, OK_GRAY])))
     now_rule = alt.Chart(pd.DataFrame({'p': [p]})).mark_rule(strokeDash=[4, 4]).encode(x='p:Q')
     st.altair_chart((chart + now_rule).properties(height=360), width='stretch')
+
+
+# 화면 위치 → 주소 (뒤로 가기·앞으로 가기용, 맨 위 apply_url과 짝)
+sync_url()

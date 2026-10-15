@@ -142,7 +142,10 @@ class ActionLog:
     def inspection_accuracy(self):
         """(판단과 확인이 모두 있는 기록 수, 점검으로 원인 부품을 맞힌 비율). 모든 데이터 세트·시각을 합쳐 본다(경험이 쌓이는 것)"""
         df = self.frame()
-        df = df[(df['종류'] == '점검 결과') & df['확인된 원인'].isin(PARTS)]
+        df = df[df['종류'] == '점검 결과']
+        # 완료 보고를 고치면 같은 설비·같은 완료 시각으로 다시 기록한다 → 마지막 기록만 센다 (기록 자체는 이력으로 남김)
+        df = df.drop_duplicates(['데이터 세트', '설비', '시각(h)'], keep='last')
+        df = df[df['확인된 원인'].isin(PARTS)]
         if df.empty:
             return 0, None
         return len(df), float((df['점검 판단'] == df['확인된 원인']).mean())

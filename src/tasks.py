@@ -4,6 +4,7 @@
     store = TaskStore(path)                  # 로컬: SQLite 파일 / TaskStore(None): 세션 안에서만 (공개 클라우드)
     store.add(split, sid, title, team, priority, due_h, created_h, guide, reason, option)   # 같은 설비에 열린 작업이 있으면 False
     store.start(task_id, hour); store.complete(task_id, hour, outcome, details, judged, confirmed)
+    store.edit(...)  /  store.edit_report(task_id, outcome, details, judged, confirmed)   # 완료된 작업의 보고 고치기
     store.frame(split, now)                  # 지금 시각에 보이는 작업과 상태(대기·진행 중·완료)
 
 재생 시각: 데이터는 시나리오 시작 후 0~72시간을 재생한다. 그래서 작업의 배정·시작·완료와 예정 시각을 시나리오 시각(h)으로
@@ -191,15 +192,17 @@ class TaskStore:
         self.rows.append(row)
         return True
 
-    def _update(self, task_id, fields, where_open=False):
+    def _update(self, task_id, fields, where_open=False, where_done=False):
         fields = {**fields, 'updated_at': _now()}
         if self.path:
             with self._conn() as c:
                 sets = ','.join(f'{k}=?' for k in fields)
-                sql = f'UPDATE tasks SET {sets} WHERE id=?' + (' AND completed_h IS NULL' if where_open else '')
+                sql = (f'UPDATE tasks SET {sets} WHERE id=?' + (' AND completed_h IS NULL' if where_open else '')
+                       + (' AND completed_h IS NOT NULL' if where_done else ''))
                 return c.execute(sql, [*fields.values(), int(task_id)]).rowcount > 0
         for r in self.rows:
-            if r['id'] == int(task_id) and not (where_open and r['completed_h'] is not None):
+            if (r['id'] == int(task_id) and not (where_open and r['completed_h'] is not None)
+                    and not (where_done and r['completed_h'] is None)):
                 r.update(fields)
                 return True
         return False
@@ -217,6 +220,16 @@ class TaskStore:
         h = _hour(hour)
         return self._update(task_id, {'completed_h': h, 'outcome': outcome, 'details': details, 'judged': judged,
                                       'confirmed': confirmed, 'completed_at': _now()}, where_open=True)
+
+    def edit_report(self, task_id, outcome, details, judged, confirmed):
+        """완료 보고 고치기 (설비관리자): 이미 완료된 작업만. 완료 시각은 그대로 둔다"""
+        details = clean(details, LIMITS['details'])
+        if outcome not in OUTCOMES or judged not in JUDGED or confirmed not in CONFIRMED:
+            raise ValueError('결과·부품은 정해진 값만')
+        if not details:
+            raise ValueError('수행 내용은 비울 수 없습니다')
+        return self._update(task_id, {'outcome': outcome, 'details': details, 'judged': judged, 'confirmed': confirmed},
+                            where_done=True)
 
     def edit(self, task_id, team, priority, due_h, guide, reason):
         if team not in TEAMS or priority not in PRIORITIES:

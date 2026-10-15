@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from src.posko_data import load_scenarios
 from src.dss import fail_prob, field_costs, options, plans, recommend
-from src import app_data, ontology
+from src import actions, app_data, ontology
 from src.auth import require_login
 from src.serving import cost_curve, explain, failure_hours, load_bundle, score_scenarios
 
@@ -148,6 +148,39 @@ mnt_now = mnt[mnt['START_H'] <= now].assign(
     시작=lambda d: d['START_H'].map(lambda x: f'{x:.1f}h'),
     종료=lambda d: d['END_H'].map(lambda x: f'{x:.1f}h' if x <= now else '진행 중 (종료 미확정)'))   # 미래의 종료 시각은 보여 주지 않는다
 last_mnt_start = mnt_now.groupby('SCENARIO_ID')['START_H'].max()     # 지금까지 마지막으로 시작된 정비
+
+
+# 액션 기록 (src/actions.py): 로컬은 CSV 파일(actions/, 커밋하지 않음), 클라우드는 보는 사람의 세션에만
+#   클라우드 대시보드는 공개(비밀번호 없음)라 서버 파일에 쓰게 하면 누구나 기록을 남기고 남의 기록을 볼 수 있다
+@st.cache_resource
+def get_local_log():
+    return actions.ActionLog(ROOT / 'actions' / 'action_log.csv')
+
+
+if CLOUD:
+    if 'action_log' not in st.session_state:
+        st.session_state['action_log'] = actions.ActionLog(None)
+    LOG = st.session_state['action_log']
+else:
+    LOG = get_local_log()
+MNT_START = last_mnt_start.to_dict()
+
+
+@st.cache_data
+def part_breakeven():
+    """원인 부품을 맞힐 확률이 이 값 이상이면 한 부품만 교체하는 쪽이 싸다 (비용 계산기와 같은 계산)"""
+    v = bundle['validation']['event']
+    cc = cost_curve(n_det=v['감지'], n_miss=v['놓침'], n_needed=v['고장과 무관한 경보 묶음: 필요한 교체'],
+                    n_false=v['고장과 무관한 경보 묶음: 오경보'])
+    even = cc.loc[cc['한 부품만 교체'] <= cc['두 부품 모두 교체'].iloc[0], 'p']
+    return float(even.iloc[0]) if len(even) else None
+
+
+def feedback():
+    """점검 되먹임: 점검으로 원인 부품을 맞힌 비율이 손익분기를 넘으면 '점검 후 한 부품'"""
+    n, acc = LOG.inspection_accuracy()
+    be = part_breakeven()
+    return {'n': n, 'accuracy': acc, 'breakeven': be, 'ready': be is not None and actions.one_part_ready(n, acc, be)}
 
 
 def after_last_maintenance(df, time_col):
@@ -294,6 +327,10 @@ def work_plan(A, t):
                      '_e': e, '_slot': slot,
                      '_start': (e['wait_h'] if b['선택지'].startswith('다음 정기') else b['정비 완료까지(h)'] - costs.replace_h)})
     dec = pd.DataFrame(rows)
+    if len(dec):
+        state = LOG.decision_state(split, now, MNT_START)
+        dec.insert(3, '방법', '점검 후 한 부품' if feedback()['ready'] else '두 부품')
+        dec.insert(1, '조치', dec['설비 (시나리오)'].map(lambda x: state[x]['종류'] if x in state else '대기'))
     return {'dec': dec, 'need_crew': need_crew, 'per_day': per_day, 'evaluate_options': evaluate_options,
             'cfg': cfg, 'costs': costs, 'curve': curve, 'pl': pl}
 
@@ -320,7 +357,7 @@ def ontology_graph(A, t, with_decisions=True):
         decisions = [{'sid': r['설비 (시나리오)'], 'rank': r['순위'], 'constraint': r['제약'], 'best': r['추천'],
                       'options': r['_e']['opts']} for _, r in W['dec'].iterrows()]
     return ontology.build(now, status, signals, mnt_now, get_plans(split), decisions, cost_unit=unit, safety_max=safety,
-                          th=TH, cth=CTH)
+                          th=TH, cth=CTH, actions=LOG.frame(split, now), feedback=feedback())
 
 
 def open_detail(table_key, ids):
@@ -390,9 +427,13 @@ if page == '오늘 할 일':
                 why = '경보가 켜진 지 오래됨 · 지금 바로'
             else:
                 why = (f'24시간 안 고장 위험 · 다음 정기 교체 {"없음" if pd.isna(e["wait_h"]) else f"{e["wait_h"]:.0f}시간 뒤라 기다릴 수 없음"}')
+            one = r['방법'] == '점검 후 한 부품'
             jobs.append({'순서': '정기 교체 때' if plan else f'{int(r["순위"])}',
                          '설비': r['설비 (시나리오)'],
-                         '할 일': '정기 교체 때 두 부품 함께 교체' if plan else '설비 정지 · 두 부품(밸브·진동장치) 교체',
+                         '승인': {'승인': '승인됨', '보류': '보류'}.get(r['조치'], '승인 대기'),
+                         '할 일': ('정기 교체 때 ' if plan else '설비 정지 · ')
+                                 + ('점검으로 원인 부품을 가려 그 부품만 교체' if one else
+                                    ('두 부품 함께 교체' if plan else '두 부품(밸브·진동장치) 교체')),
                          '시작 (h)': now + r['_start'], '끝 (h)': now + r['_start'] + costs.replace_h,
                          '끝나기 전 고장 위험': risk_word(p_fail, cfg.safety_max), '이유': why})
         jt = pd.DataFrame(jobs)
@@ -403,7 +444,8 @@ if page == '오늘 할 일':
                                     '끝 (h)': st.column_config.NumberColumn(format='%d시간'),
                                     '이유': st.column_config.TextColumn(width='large')})
         st.caption(f'정비팀 {A["n_crews"]}팀 · 팀당 하루 {A["crew_day_h"]}공수(교체 {W["per_day"]}번)로 순서를 정했습니다. '
-                   '줄을 누르면 그 설비의 신호 흐름을 볼 수 있습니다. 순서와 기준은 정비 책임자가 정합니다.')
+                   '줄을 누르면 그 설비의 신호 흐름을 볼 수 있습니다. 순서와 기준은 정비 책임자가 정하고, '
+                   '승인된 작업부터 진행합니다. 점검·교체 뒤에는 설비 상세 화면에서 점검 결과를 입력해 주세요.')
 
     if cau:
         st.subheader('점검할 설비', icon=':material/search_check:')
@@ -420,6 +462,7 @@ if page == '오늘 할 일':
     with st.expander('이 화면 보는 법', icon=':material/help:'):
         st.markdown('- **작업 순서**: 고장 위험이 큰 설비부터 정비팀에 배정했습니다. 정기 교체가 곧 있는 설비는 그때 함께 교체합니다.\n'
                     '- **끝나기 전 고장 위험**: 교체가 끝나기 전에 고장 날 가능성입니다(낮음 · 보통 · 높음).\n'
+                    '- **승인**: 정비 책임자가 의사결정 화면에서 승인·보류한 상태입니다.\n'
                     '- **점검할 설비**: 열화가 시작됐지만 아직 24시간 안 고장 위험은 낮습니다. 상태를 확인하고 부품을 준비합니다.\n'
                     '- 이 화면은 지나간 데이터를 재생합니다. 실제로는 조치하지 않은 경보가 쌓여 보일 수 있습니다.')
 
@@ -610,6 +653,21 @@ elif page == '설비 상세':
                    '판단은 그래프가 아니라 경보 기준과 의사결정 규칙이 합니다. 센서로는 원인 부품을 구분할 수 없어 '
                    '"신호 → 부품" 링크는 두지 않았습니다.')
 
+    with st.expander('점검 결과 입력', icon=':material/edit_note:', expanded=(role == '현장 작업' and row['상태'] in (WARN, CAU, '정비 중'))):
+        with st.form(f'inspect_{sid}', clear_on_submit=True, border=False):
+            i1, i2 = st.columns(2)
+            judged = i1.segmented_control('점검으로 판단한 부품', actions.JUDGED, required=True, default='구분 못함',
+                                          format_func=lambda x: PART_NAMES.get(x, x), key=f'judged_{sid}')
+            conf = i2.segmented_control('교체 뒤 확인된 원인 부품', actions.CONFIRMED, required=True, default='아직 모름',
+                                        format_func=lambda x: PART_NAMES.get(x, x), key=f'conf_{sid}')
+            note = st.text_input('메모 (선택)', max_chars=actions.MAX_NOTE, placeholder='예: 진동장치 베어링 소음')
+            if st.form_submit_button('기록', icon=':material/save:'):
+                LOG.record('점검 결과', split, sid, now, role, judged=judged, confirmed=conf, note=note)
+                st.toast(f'{sid}: 점검 결과 기록', icon=':material/save:')
+                st.rerun()
+        st.caption('점검으로 판단한 부품과 교체 뒤 실제로 확인된 원인이 쌓이면, 점검으로 부품을 맞히는 비율을 잽니다. '
+                   '이 비율이 손익분기를 넘으면 "두 부품 교체" 대신 "점검 후 한 부품"을 추천합니다(의사결정 화면의 조치 기록).')
+
 
 # 3. 의사결정 (DSS)
 
@@ -757,6 +815,32 @@ elif page == '의사결정':
         (st.info if b['선택지'].startswith('다음 정기') else st.warning)(
             msg + f'\n\n기대 총비용 {won(b["기대 총비용"])} = (1 − 고장 확률 {b["고장 확률"]:.2f}) × (정비 {b["정비 비용"]:,.0f} + 생산 차질 {b["생산 차질 비용"]:,.0f})'
             f' + {b["고장 확률"]:.2f} × 고장 시 손실 {b["고장 시 손실"]:,.0f} ({U})')
+        with st.container(border=True):
+            cur = LOG.decision_state(split, now, MNT_START).get(sid)
+            st.markdown(f'**조치** · 지금 상태: ' + (f'{cur["종류"]} ({cur["시각(h)"]:.0f}h, {cur["선택지"] or "-"})' if cur else '대기'))
+            with st.container(horizontal=True, vertical_alignment='bottom'):
+                memo = st.text_input('메모 (선택)', max_chars=actions.MAX_NOTE, key=f'memo_{sid}', placeholder='예: 생산 일정 확인 후 결정')
+                if st.button('승인', icon=':material/check_circle:', type='primary', key=f'ok_{sid}'):
+                    LOG.record('승인', split, sid, now, '정비 책임자', option=b['선택지'], note=memo)
+                    st.toast(f'{sid}: "{b["선택지"]}" 승인', icon=':material/check_circle:')
+                    st.rerun()
+                if st.button('보류', icon=':material/pause_circle:', key=f'hold_{sid}'):
+                    LOG.record('보류', split, sid, now, '정비 책임자', option=b['선택지'], note=memo)
+                    st.toast(f'{sid}: 보류', icon=':material/pause_circle:')
+                    st.rerun()
+            ordered = LOG.orders(split, now, MNT_START).get(sid, set())
+            with st.container(horizontal=True, vertical_alignment='bottom'):
+                want = st.pills('부품 발주', actions.PARTS, selection_mode='multi', default=[x for x in actions.PARTS if x not in ordered],
+                                format_func=PART_NAMES.get, key=f'order_{sid}')
+                if st.button('발주 기록', icon=':material/local_shipping:', key=f'orderbtn_{sid}', disabled=not want):
+                    for part in want:
+                        LOG.record('부품 발주', split, sid, now, '정비 책임자', part=part, note=memo)
+                    st.toast(f'{sid}: ' + ', '.join(PART_NAMES[x] for x in want) + ' 발주', icon=':material/local_shipping:')
+                    st.rerun()
+            st.caption(('발주한 부품: ' + ', '.join(PART_NAMES[x] for x in sorted(ordered)) + ' · ' if ordered else '')
+                       + '승인하면 현장 작업 화면의 할 일에 "승인됨"으로 표시됩니다. 정비가 시작되면 그 전의 승인·보류는 끝난 것으로 봅니다. '
+                       + ('클라우드에서는 기록이 이 브라우저 세션에만 남습니다(공개 화면이라 서버에 저장하지 않음).' if CLOUD
+                          else '기록은 이 컴퓨터의 actions/action_log.csv에 쌓입니다.'))
         left, right = st.columns([1.3, 1])
         with left:
             ot = pd.DataFrame(e['opts'])
@@ -797,7 +881,25 @@ elif page == '의사결정':
             st.altair_chart(alt.layer(*marks).properties(height=240), width='stretch')
             st.caption('파란 선: 지금부터 h시간 안에 고장 날 확률 · 초록 점: 선택지별 정비 완료 시점 · 빨간 점선: 안전 기준')
 
-    # ⑤ 주의 설비
+    # ⑤ 조치 기록과 점검 되먹임
+    with st.expander('조치 기록과 점검 되먹임', icon=':material/history:'):
+        fb = feedback()
+        f1, f2, f3 = st.columns(3, border=True)
+        f1.metric('점검 결과 (원인 확인됨)', f'{fb["n"]}건', help=f'되먹임은 {actions.MIN_CONFIRMED}건 이상부터 씁니다 (가정값)')
+        f2.metric('점검으로 원인 부품을 맞힌 비율', '—' if fb['accuracy'] is None else f'{fb["accuracy"]:.2f}')
+        f3.metric('교체 방법 추천', '점검 후 한 부품' if fb['ready'] else '두 부품',
+                  help=f'맞힌 비율이 손익분기 {fb["breakeven"]:.2f} 이상이고 기록이 {actions.MIN_CONFIRMED}건 이상이면 "점검 후 한 부품"' if fb['breakeven'] else None)
+        st.caption('센서로는 원인 부품을 구분할 수 없어(EDA E9) 지금은 두 부품을 함께 교체합니다. 현장이 점검 결과와 교체 뒤 확인된 원인을 입력하면, '
+                   '점검으로 부품을 맞히는 비율이 쌓이고 이 값이 비용 계산기의 손익분기를 넘으면 추천이 바뀝니다.')
+        lg = LOG.frame(split, now)
+        if lg.empty:
+            st.write('이 데이터 세트에서 지금 시각까지 기록된 조치가 없습니다.')
+        else:
+            st.dataframe(lg.drop(columns=['데이터 세트']).iloc[::-1], hide_index=True,
+                         column_config={'시각(h)': st.column_config.NumberColumn(format='%d'),
+                                        '부품': st.column_config.TextColumn(), '메모': st.column_config.TextColumn(width='medium')})
+
+    # ⑥ 주의 설비
     cau = t.index[t['상태'] == CAU].tolist()
     if cau:
         st.subheader('주의 설비 준비', icon=':material/search_check:')
@@ -810,7 +912,7 @@ elif page == '의사결정':
                               f'장비 점검, 두 부품 재고 확인 (조달 {cfg.prep_h:.0f}시간 가정. 경보가 켜지면 지금 교체 대상)')
         st.dataframe(cd, hide_index=True)
 
-    # ⑥ 정책 시뮬레이션 상세
+    # ⑦ 정책 시뮬레이션 상세
     if sim:
         with st.expander('정책 시뮬레이션 상세 (검증 세트, 기본 가정값)'):
             sv = pd.DataFrame(list(sim.values())).set_index('정책')

@@ -17,6 +17,8 @@
   works      정비 기록: SCENARIO_ID, PART_CD, 종류, START_H, END_H, FAIL_H (시작이 지금 이전인 것)
   plans      앞으로의 정기 교체 계획: SCENARIO_ID, PLAN_H, PLAN_PART
   decisions  경보 설비마다 {'sid', 'rank', 'constraint', 'best', 'options': [src.dss.options의 선택지 dict]}
+  actions    사람이 한 일 (src.actions.ActionLog.frame(split, now)): 승인·보류·부품 발주·점검 결과
+  feedback   점검 되먹임 {'n', 'accuracy', 'breakeven', 'ready'} (src.actions.inspection_accuracy, one_part_ready)
 """
 
 import math
@@ -62,7 +64,8 @@ def tbox():
     return g
 
 
-def build(now, status, signals, works, plans, decisions=(), cost_unit=None, safety_max=None, th=None, cth=None):
+def build(now, status, signals, works, plans, decisions=(), cost_unit=None, safety_max=None, th=None, cth=None,
+          actions=None, feedback=None):
     """지금 시각 now의 상태로 TBox + ABox 그래프를 만든다"""
     g = tbox()
     eq = {}
@@ -186,6 +189,42 @@ def build(now, status, signals, works, plans, decisions=(), cost_unit=None, safe
                 g.add((op, CC.joinsPlan, plan_of[s]))
             if o['선택지'] == d['best']:
                 g.add((dc, CC.recommends, op))
+
+    # 액션 (사람이 한 일). 승인·보류는 지금 결정이 있을 때 그 결정과 선택지에 잇는다
+    kinds = {'승인': CC.Approval, '보류': CC.Hold, '부품 발주': CC.PartOrder, '점검 결과': CC.InspectionResult}
+    if actions is not None:
+        for i, a in actions.reset_index(drop=True).iterrows():
+            s = _sid(a['설비'])
+            if s not in eq or a['종류'] not in kinds:
+                continue
+            ac = CC[f'action_{s}_{i}']
+            g.add((ac, RDF.type, kinds[a['종류']]))
+            g.add((ac, CC.actionOn, eq[s]))
+            g.add((ac, CC.atHour, _num(a['시각(h)'])))
+            g.add((ac, CC.byRole, Literal(str(a['누가']))))
+            if a.get('메모'):
+                g.add((ac, CC.note, Literal(str(a['메모']))))
+            dc = CC[f'decision_{s}']
+            if a['종류'] in ('승인', '보류') and (dc, RDF.type, CC.MaintenanceDecision) in g:
+                g.add((ac, CC.actsOn, dc))
+                if a['종류'] == '승인':
+                    for op in g.objects(dc, CC.considers):
+                        if str(g.value(op, RDFS.label)) == a.get('선택지'):
+                            g.add((ac, CC.approvedOption, op))
+            if a['종류'] == '부품 발주' and a.get('부품') in PART_CLASS:
+                g.add((ac, CC.orders, CC[f'part_{s}_{a["부품"]}']))
+            if a['종류'] == '점검 결과':
+                if a.get('점검 판단') in PART_CLASS:
+                    g.add((ac, CC.judgedPart, CC[f'part_{s}_{a["점검 판단"]}']))
+                if a.get('확인된 원인') in PART_CLASS:
+                    g.add((ac, CC.confirmedPart, CC[f'part_{s}_{a["확인된 원인"]}']))
+    if feedback is not None:
+        fb = CC.inspection_feedback
+        g.add((fb, RDF.type, CC.InspectionFeedback))
+        g.add((fb, CC.sampleSize, Literal(int(feedback['n']), datatype=XSD.integer)))
+        _add(g, fb, CC.accuracy, _num(feedback.get('accuracy')))
+        _add(g, fb, CC.threshold, _num(feedback.get('breakeven')))
+        g.add((fb, CC.onePartReady, Literal(bool(feedback.get('ready')))))
     return g
 
 
@@ -234,6 +273,23 @@ SELECT ?kind ?start ?end ?part WHERE {
   OPTIONAL { ?w cc:replaces ?p . ?p a ?pc . ?pc rdfs:subClassOf cc:Part ; rdfs:label ?part }
 } ORDER BY ?start"""
 
+Q_ACTIONS = PREFIX + """
+SELECT ?kind ?h ?role ?note ?opt ?ord ?judged ?conf WHERE {
+  ?a cc:actionOn ?e ; a ?k ; cc:atHour ?h ; cc:byRole ?role .
+  ?k rdfs:subClassOf cc:Action ; rdfs:label ?kind .
+  OPTIONAL { ?a cc:note ?note }
+  OPTIONAL { ?a cc:approvedOption ?o . ?o rdfs:label ?opt }
+  OPTIONAL { ?a cc:orders ?p1 . ?p1 a ?c1 . ?c1 rdfs:subClassOf cc:Part ; rdfs:label ?ord }
+  OPTIONAL { ?a cc:judgedPart ?p2 . ?p2 a ?c2 . ?c2 rdfs:subClassOf cc:Part ; rdfs:label ?judged }
+  OPTIONAL { ?a cc:confirmedPart ?p3 . ?p3 a ?c3 . ?c3 rdfs:subClassOf cc:Part ; rdfs:label ?conf }
+} ORDER BY ?h"""
+
+Q_FEEDBACK = PREFIX + """
+SELECT ?n ?acc ?be ?ready WHERE {
+  ?f a cc:InspectionFeedback ; cc:sampleSize ?n ; cc:onePartReady ?ready .
+  OPTIONAL { ?f cc:accuracy ?acc }  OPTIONAL { ?f cc:threshold ?be }
+}"""
+
 Q_PARTS_NEEDED = PREFIX + """
 SELECT ?part (COUNT(DISTINCT ?e) AS ?n) WHERE {
   ?al a cc:WarningAlarm ; cc:alarmOn ?e .
@@ -273,7 +329,12 @@ def trace(g, sid, with_cost=True):
                         + (f' · 평균 {avg[0]["score"]:.2f}' if avg else '') + f'  ({main[0]["h"]:.0f}h까지 1시간 값, 1 = 정상 경계)'))
     else:
         out.append(('근거 예측', '지금 쓸 수 있는 예측이 없습니다 (정비 중이거나 재가동 뒤 예측 대기)'))
-    out.append(('원인 부품', '밸브 · 진동장치 중 어느 쪽인지 센서로는 구분할 수 없어 두 부품 모두 대상 (부록 A E9)'))
+    fb = [{k: _py(r[k]) for k in r.labels} for r in g.query(Q_FEEDBACK)]
+    if fb and fb[0]['ready']:
+        out.append(('원인 부품', f'센서로는 구분할 수 없지만, 점검으로 원인 부품을 맞힌 비율 {fb[0]["acc"]:.2f}({fb[0]["n"]}건)가 '
+                                f'손익분기 {fb[0]["be"]:.2f}를 넘어 점검 후 한 부품 교체를 추천 (점검 되먹임)'))
+    else:
+        out.append(('원인 부품', '밸브 · 진동장치 중 어느 쪽인지 센서로는 구분할 수 없어 두 부품 모두 대상 (부록 A E9)'))
     dec = _rows(g, Q_DECISION, sid)
     if dec:
         d0 = dec[0]
@@ -291,6 +352,17 @@ def trace(g, sid, with_cost=True):
             out.append(('정비 결정', head + ' · ' + ' · '.join(x for x in parts if x)))
         if d0['note']:
             out.append(('제약', d0['note']))
+    for a in _rows(g, Q_ACTIONS, sid):
+        txt = f'{a["kind"]} · {a["h"]:.0f}h · {a["role"]}'
+        if a['opt']:
+            txt += f' · {a["opt"]}'
+        if a['ord']:
+            txt += f' · {a["ord"]}'
+        if a['kind'] == '점검 결과':
+            txt += f' · 점검 판단 {a["judged"] or "구분 못함"} · 확인된 원인 {a["conf"] or "아직 모름"}'
+        if a['note']:
+            txt += f' · 메모: {a["note"]}'
+        out.append(('조치', txt))
     hist = _rows(g, Q_HISTORY, sid)
     if hist:
         out.append(('정비 이력', ' · '.join(f'{h["kind"]} {h["start"]:.0f}h' + (f'({h["part"]})' if h['part'] else '') for h in hist)))
@@ -314,7 +386,15 @@ def check(g):
         bad.append('추천 선택지가 없는 정비 결정이 있다')
     if g.query(PREFIX + 'ASK { ?a cc:requests ?d . FILTER NOT EXISTS { ?a a cc:WarningAlarm } }').askAnswer:
         bad.append('경보가 아닌 단계가 정비 결정을 요청했다')
-    for prop, dom in [(CC.predictsFor, CC.Prediction), (CC.performedOn, CC.MaintenanceWork), (CC.alarmOn, CC.Alarm)]:
+    if g.query(PREFIX + 'ASK { ?a cc:actsOn ?d ; cc:actionOn ?e . ?al cc:requests ?d ; cc:alarmOn ?e2 . FILTER(?e != ?e2) }').askAnswer:
+        bad.append('다른 설비의 정비 결정에 조치가 붙었다')
+    if g.query(PREFIX + 'ASK { ?a a cc:Approval , cc:Hold }').askAnswer:
+        bad.append('승인과 보류가 한 조치에 같이 붙었다')
+    for prop in (CC.orders, CC.judgedPart, CC.confirmedPart):
+        for a, p in g.subject_objects(prop):
+            if (g.value(a, CC.actionOn), CC.hasPart, p) not in g:
+                bad.append(f'{a} 의 부품이 그 설비의 부품이 아니다')
+    for prop, dom in [(CC.predictsFor, CC.Prediction), (CC.performedOn, CC.MaintenanceWork), (CC.alarmOn, CC.Alarm), (CC.actionOn, CC.Action)]:
         for s in g.subjects(prop, None):
             if not any((s, RDF.type, c) in g for c in [dom, *g.subjects(RDFS.subClassOf, dom)]):
                 bad.append(f'{s} 의 종류가 {dom} 가 아니다')

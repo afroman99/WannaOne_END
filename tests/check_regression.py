@@ -237,6 +237,48 @@ _g.add((ontology.CC['read_S0248_MLD_AMP'], ontology.CC.replaces, ontology.CC['pa
 check('신호 → 부품 링크를 넣으면 점검에서 잡는다', any('신호 → 부품' in b for b in ontology.check(_g)))
 check('IRI에 쓸 수 없는 ID는 막는다', raises(lambda: ontology._sid('S0248> . <x'), ValueError))
 
+print('\n11. 온톨로지 액션 (승인·보류·발주·점검 결과)')
+from src import actions as _ac
+with _tf.TemporaryDirectory() as d:
+    _f = Path(d) / 'log.csv'
+    _log = _ac.ActionLog(_f)
+    _log.record('승인', 'validation', 'S0248', 16, '정비 책임자', option='다음 정기 교체 때 두 부품 함께', note='=HYPERLINK("x")')
+    _log.record('부품 발주', 'validation', 'S0248', 16, '정비 책임자', part='valve')
+    check('정해진 값이 아니면 기록하지 않는다 (종류·역할·설비 ID·시각·부품, 승인은 정비 책임자만)',
+          all(raises(fn, ValueError) for fn in [
+              lambda: _log.record('삭제', 'validation', 'S0248', 16, '정비 책임자'),
+              lambda: _log.record('승인', 'validation', 'S0248', 16, '현장 작업'),
+              lambda: _log.record('승인', 'validation', '../S0248', 16, '정비 책임자'),
+              lambda: _log.record('승인', 'validation', 'S0248', 99, '정비 책임자'),
+              lambda: _log.record('부품 발주', 'validation', 'S0248', 16, '정비 책임자', part='pump')]))
+    check('메모의 표 계산기 수식 주입을 막는다', _log.rows[0]['메모'].startswith("'="))
+    with open(_f, 'a', encoding='utf-8') as fh:
+        fh.write('2026-01-01,validation,S9999 OR 1,1,승인,정비 책임자,,,,,\n')
+    _log2 = _ac.ActionLog(_f)
+    check('파일에서 다시 읽고, 형식이 맞지 않는 줄은 버린다', len(_log2.rows) == 2)
+    check('승인은 그 뒤 정비가 시작되면 끝난다', 'S0248' in _log2.decision_state('validation', 20)
+          and 'S0248' not in _log2.decision_state('validation', 30, {'S0248': 24.0})
+          and 'S0248' not in _log2.decision_state('validation', 15))
+_mem = _ac.ActionLog(None)
+for _i in range(10):
+    _mem.record('점검 결과', 'test', f'S{300 + _i:04d}', 10, '현장 작업', judged='valve', confirmed='valve' if _i < 7 else 'oscillator')
+_n, _acc = _mem.inspection_accuracy()
+check('점검 되먹임: 10건 중 7건 맞힘 → 0.70 ≥ 손익분기 0.60이면 점검 후 한 부품, 9건이면 아직',
+      _n == 10 and abs(_acc - 0.7) < 1e-9 and _ac.one_part_ready(_n, _acc, 0.60) and not _ac.one_part_ready(9, _acc, 0.60))
+_acts = pd.DataFrame([
+    _ac.validate({'종류': '승인', '데이터 세트': 'validation', '설비': 'S0248', '시각(h)': 16, '누가': '정비 책임자',
+                  '선택지': '다음 정기 교체 때 두 부품 함께'}),
+    _ac.validate({'종류': '점검 결과', '데이터 세트': 'validation', '설비': 'S0248', '시각(h)': 16, '누가': '현장 작업',
+                  '점검 판단': 'valve', '확인된 원인': '아직 모름'})])
+_g2 = ontology.build(_now, _st, _sg, _mv[_mv['START_H'] <= _now], _plv, _dec, cost_unit='점', safety_max=0.2, th=0.56, cth=0.57,
+                     actions=_acts, feedback={'n': 10, 'accuracy': 0.7, 'breakeven': 0.6, 'ready': True})
+_tr2 = ontology.trace(_g2, 'S0248')
+check('그래프: 승인이 정비 결정과 추천 선택지에 이어지고 규칙 점검 통과',
+      ontology.check(_g2) == [] and any(k == '조치' and v.startswith('승인') and '다음 정기 교체' in v for k, v in _tr2)
+      and any(k == '원인 부품' and '점검 후 한 부품' in v for k, v in _tr2), ontology.check(_g2))
+_g2.add((ontology.CC['action_S0248_1'], ontology.CC.judgedPart, ontology.CC['part_S0222_valve']))
+check('다른 설비의 부품을 가리키는 점검 결과는 점검에서 잡는다', any('그 설비의 부품이 아니다' in b for b in ontology.check(_g2)))
+
 n_fail = sum(not ok for _, ok in results)
 print(f'\n결과: {len(results) - n_fail}/{len(results)}개 통과')
 sys.exit(1 if n_fail else 0)

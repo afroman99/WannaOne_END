@@ -207,3 +207,6 @@ models/
 # 클라우드용 대시보드 데이터 app_data/ (src/app_data.py가 만든다)는 커밋한다. 위의 *.parquet 규칙에서 이 폴더만 뺀다
 !app_data/*.parquet
 # 강사 제공 데이터에서 나온 결과(1.3MB, 원자료 없음)이고, 공개 저장소에 올리는 것은 강사님 허락을 받았다(2026-10-15)
+
+# 대시보드 조치 기록 (로컬 전용, src/actions.py)
+actions/

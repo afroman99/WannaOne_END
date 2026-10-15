@@ -53,6 +53,20 @@ cc:Failure a owl:Class ; rdfs:label "고장"@ko ;
 cc:Equipment owl:disjointWith cc:Part , cc:Signal .
 cc:Signal owl:disjointWith cc:Part .
 
+# ── 액션 (사람이 화면에서 한 일 → 다시 데이터로, src/actions.py) ──────────
+
+cc:Action a owl:Class ; rdfs:label "조치"@ko .
+cc:Approval a owl:Class ; rdfs:subClassOf cc:Action ; rdfs:label "승인"@ko ;
+    rdfs:comment "정비 책임자가 정비 결정을 승인 → 정비 작업으로"@ko .
+cc:Hold a owl:Class ; rdfs:subClassOf cc:Action ; rdfs:label "보류"@ko ;
+    rdfs:comment "정비 책임자가 정비 결정을 보류 → 다시 판단"@ko .
+cc:PartOrder a owl:Class ; rdfs:subClassOf cc:Action ; rdfs:label "부품 발주"@ko .
+cc:InspectionResult a owl:Class ; rdfs:subClassOf cc:Action ; rdfs:label "점검 결과"@ko ;
+    rdfs:comment "현장이 점검으로 판단한 부품과 교체 뒤 확인된 원인 부품. 쌓이면 '점검으로 부품을 맞힐 확률'이 된다"@ko .
+cc:InspectionFeedback a owl:Class ; rdfs:label "점검 되먹임"@ko ;
+    rdfs:comment "점검 결과로 잰 원인 부품 맞힘 비율과 손익분기. 넘으면 교체 방법 추천이 '점검 후 한 부품'으로 바뀐다"@ko .
+cc:Approval owl:disjointWith cc:Hold .
+
 # ── 링크 (객체 속성) ───────────────────────────────────────────
 
 cc:hasPart a owl:ObjectProperty ; rdfs:label "가진다"@ko ;
@@ -92,6 +106,19 @@ cc:occurredOn a owl:ObjectProperty ; rdfs:label "고장 난 설비"@ko ;
 cc:causedBy a owl:ObjectProperty ; rdfs:label "원인 부품"@ko ;
     rdfs:domain cc:Failure ; rdfs:range cc:Part .
 
+cc:actsOn a owl:ObjectProperty ; rdfs:label "대상 결정"@ko ;
+    rdfs:domain cc:Action ; rdfs:range cc:MaintenanceDecision .
+cc:actionOn a owl:ObjectProperty ; rdfs:label "대상 설비"@ko ;
+    rdfs:domain cc:Action ; rdfs:range cc:Equipment .
+cc:approvedOption a owl:ObjectProperty ; rdfs:label "승인한 선택지"@ko ;
+    rdfs:domain cc:Approval ; rdfs:range cc:MaintenanceOption .
+cc:orders a owl:ObjectProperty ; rdfs:label "발주한다"@ko ;
+    rdfs:domain cc:PartOrder ; rdfs:range cc:Part .
+cc:judgedPart a owl:ObjectProperty ; rdfs:label "점검 판단 부품"@ko ;
+    rdfs:domain cc:InspectionResult ; rdfs:range cc:Part .
+cc:confirmedPart a owl:ObjectProperty ; rdfs:label "확인된 원인 부품"@ko ;
+    rdfs:domain cc:InspectionResult ; rdfs:range cc:Part .
+
 # ── 값 (데이터 속성) ───────────────────────────────────────────
 
 cc:atHour a owl:DatatypeProperty ; rdfs:label "시각 (시나리오 시작 후 h)"@ko ; rdfs:range xsd:decimal .
@@ -126,6 +153,15 @@ cc:equipmentId a owl:DatatypeProperty ; rdfs:label "설비 ID"@ko ;
     rdfs:domain cc:Equipment ; rdfs:range xsd:string .
 cc:scenarioId a owl:DatatypeProperty ; rdfs:label "시나리오 ID"@ko ;
     rdfs:domain cc:Equipment ; rdfs:range xsd:string .
+
+cc:byRole a owl:DatatypeProperty ; rdfs:label "누가"@ko ; rdfs:domain cc:Action ; rdfs:range xsd:string .
+cc:note a owl:DatatypeProperty ; rdfs:label "메모"@ko ; rdfs:domain cc:Action ; rdfs:range xsd:string .
+cc:accuracy a owl:DatatypeProperty ; rdfs:label "원인 부품 맞힘 비율"@ko ;
+    rdfs:domain cc:InspectionFeedback ; rdfs:range xsd:decimal .
+cc:sampleSize a owl:DatatypeProperty ; rdfs:label "기록 수"@ko ;
+    rdfs:domain cc:InspectionFeedback ; rdfs:range xsd:integer .
+cc:onePartReady a owl:DatatypeProperty ; rdfs:label "점검 후 한 부품 추천"@ko ;
+    rdfs:domain cc:InspectionFeedback ; rdfs:range xsd:boolean .
 
 # ── 공통 개체 ──────────────────────────────────────────────────
 

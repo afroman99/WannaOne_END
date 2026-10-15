@@ -898,7 +898,8 @@ else:
                 for x in ids_:
                     stg = short[x]
                     p_ = vis.loc[x, '위험 확률']
-                    job = '작업 있음' if x in busy else js.get(x, '')
+                    # 목록에는 지금 의미 있는 진행만 (배정 취소·승인 같은 지난 단계는 숨김: 취소한 설비는 그냥 배정 대기로 보인다)
+                    job = '작업 있음' if x in busy else (js.get(x, '') if js.get(x) in ('보류', '작업 시작', '작업 완료') else '')
                     label = ' · '.join(v for v in [f':{STAGE_DOT.get(stg, "gray")}[●] {x}', stg,
                                                    f'{p_:.0%}' if pd.notna(p_) else '', job] if v)
                     st.button(label, key=f'pick_{x}', width='stretch',

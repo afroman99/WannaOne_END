@@ -6,6 +6,14 @@
 
 ## 실행 방법
 
+### 0. 패키지 설치
+
+```bash
+pip install -r requirements.txt
+```
+
+- 확인한 버전을 고정해 두었다. 모델 파일은 만든 scikit-learn 버전에서만 같은 결과가 보장된다(버전이 다르면 대시보드가 경고한다).
+
 ### 1. 데이터 변환 (처음 한 번만)
 
 원본 데이터 폴더(`POSKO-PdM-Data-pdm-v2.2.0`)를 강사가 제공한 구글드라이브에서 받은 뒤, 프로젝트 루트에서 실행한다.
@@ -41,11 +49,12 @@ python analysis/08_error_analysis.py
 | `08_error_analysis.py` | 오류 분석: 검증 세트 오탐 2건·미탐 2건을 센서 시계열 위에 표시 (`05_predict_test.py`를 먼저 실행) | 약 20초 |
 | `07_cause_part.py` | 원인 부품을 5초 원자료 파형·정비 기록으로 구분할 수 있는지 확인, 근거 그림 1장 (`05_predict_test.py`를 먼저 실행) | 약 1분 |
 
-- 필요한 패키지: pandas, numpy, pyarrow, matplotlib, scikit-learn (Python 3.14, pandas 3.0, scikit-learn 1.9에서 확인)
+- 필요한 패키지: `requirements.txt` (Python 3.14, pandas 3.0, scikit-learn 1.9에서 확인)
 - 프로젝트 루트에서 실행한다. 그림은 `figures/`에 저장된다(저장소에는 올리지 않음).
 - `05_predict_test.py`는 학습한 모델을 `models/risk24.joblib`에 저장한다(저장소에는 올리지 않음). 대시보드가 이 파일을 쓴다.
 - 그래프 한글 글꼴은 `src/plotting.py`가 설치된 글꼴에서 고른다(macOS AppleGothic → Windows 맑은 고딕 → 나눔고딕). 셋 다 없으면 경고가 나오니 나눔고딕을 설치한다. 그림 파일 이름은 Windows에서도 한글이 깨지지 않게 NFC로 저장한다.
 - 전처리 코드를 고치면 `03_check_features.py`를 다시 실행해 모두 통과하는지 확인한다.
+- 코드를 고친 뒤에는 `python tests/check_regression.py`(약 30초)로 보고서·발표 숫자(경보 기준 0.67, 검증 AP 0.860, 비용 860, 테스트 경보 83개 등)와 서비스 예측이 그대로인지 확인한다. 숫자를 일부러 바꾼 경우에는 보고서와 이 파일의 `EXPECTED`를 함께 고친다.
 
 ## 데이터 출처
 
@@ -86,7 +95,7 @@ src/
   evaluate.py        시점 단위 혼동행렬, 고장 단위 감지·리드타임, 비용, 임계값 선택, 주의 단계 평가
   model.py           비교하는 모델·특징 묶음 정의, 최종 조합(FINAL), 시나리오 단위 교차검증
   plotting.py        한글 글꼴 설정(macOS·Windows·Linux), 그림 저장
-  serving.py         저장한 모델로 예측, 경보 이유(기여도), 비용 곡선 (대시보드용)
+  serving.py         저장한 모델로 예측, 경보 이유(기여도), 비용 곡선 (대시보드용). 모델 파일 해시·환경 확인
 analysis/
   01_eda.py          EDA: 데이터 품질, 열화 신호, 조기경보 한계, 운전조건, 센서 간 관계, 원인 구분, 정비 효과, 시계열 분석(주기·추세·변동성·변화점)
   02_baseline.py     기준 예제(데이터셋 toolkit의 연주 예제) 재현과 오류 분석
@@ -98,8 +107,10 @@ analysis/
   08_error_analysis.py  오류 분석: 오탐·미탐을 센서 시계열 위에 표시
 app/
   dashboard.py       조기경보 대시보드 (추가 시도, 아래 참고)
+tests/
+  check_regression.py  회귀 점검: 대표 숫자, 서비스 예측, 기여도, 비용 곡선, 안전장치
 data/posko/          변환된 데이터 (커밋하지 않음)
-models/              학습한 모델 파일 (커밋하지 않음)
+models/              학습한 모델 파일과 해시(.sha256) (커밋하지 않음)
 predictions/         테스트 세트 예측 CSV (커밋하지 않음)
 figures/             번호_내용.png (커밋하지 않음, 01~10·20~21 EDA · 11 점검 · 12~15 모델 · 16~17 주의 단계 · 18 원인 부품 · 19 오류 분석)
 reports/             문제정의서, 결과보고서 (EDA 근거는 부록 A, 모델 상세는 부록 B)
@@ -176,7 +187,7 @@ reports/             문제정의서, 결과보고서 (EDA 근거는 부록 A, �
 > 팀 과제 범위 밖에서 개인적으로 추가로 해 보고 싶은 작업이다. 모델을 서비스 형태로 쓰면 어떤 모습일지 보여 주는 시연용이다.
 
 ```bash
-pip install streamlit
+pip install -r requirements.txt         # streamlit, altair 포함
 python analysis/05_predict_test.py      # 처음 한 번: 모델 학습·저장
 streamlit run app/dashboard.py          # 브라우저에서 http://localhost:8501
 ```
@@ -184,7 +195,7 @@ streamlit run app/dashboard.py          # 브라우저에서 http://localhost:85
 | 화면 | 내용 |
 |---|---|
 | 전체 현황 | 설비(시나리오)별 지금 단계(정상 NORMAL → 주의 CAUTION(열화 감지) → 경보 WARNING(24시간 고장 위험), 그 밖에 정비 중·정비 후 예측 대기. 결과보고서 7-7절 ⑥), 위험한 순서, **부품 소요 예측**(경보 설비 = 지금 교체, 주의 설비 = 1~2일 안에 필요할 수 있음. 두 부품 모두 교체 기준) |
-| 설비 상세 | 24시간 고장 확률·열화 확률과 네 신호의 흐름, 정비·고장 기록, 지금 신호 상태, 단계별 조치 안내(주의: 장비 점검 → 다음 정비 때 함께 정비, 재고 확인) |
+| 설비 상세 | 24시간 고장 확률·열화 확률과 네 신호의 흐름, 정비·고장 기록, 지금 신호 상태, 단계별 조치 안내(주의: 장비 점검 → 다음 정비 때 함께 정비, 재고 확인), **경보 이유**(랜덤포레스트 나무의 결정 경로 기여도를 신호 묶음별로 합친 값. 기준값 0.50 + 기여도 합 = 위험 확률) |
 | 모델 정보 | 경보·주의 모델과 기준, 검증 세트 성능, 고장별 결과 |
 | 비용 계산기 | 원인 부품을 맞힐 확률에 따른 비용 (팀 결정 C). 0.67 이상 맞히면 한 부품만 바꾸는 쪽이 쌈. 미확정 경보 비용도 함께 표시 |
 

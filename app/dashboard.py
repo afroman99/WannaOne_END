@@ -57,15 +57,18 @@ def get_data(split):
     bundle = get_bundle()
     ids = load_scenarios().query('SPLIT == @split')['SCENARIO_ID'].tolist()
     pts, hr = score_scenarios(ids, bundle)
-    contrib = explain(bundle, pts)
+    contrib, unit = explain(bundle, pts)
     hr = hr.assign(DONE_H=hr['HOUR'] + 1)          # 1시간 구간이 끝난 시각 = 그 값을 알 수 있게 되는 시각
-    return pts, hr[['SCENARIO_ID', 'DONE_H', 'SCORE', *SIGNAL_NAMES]], contrib, failure_hours(ids)
+    return pts, hr[['SCENARIO_ID', 'DONE_H', 'SCORE', *SIGNAL_NAMES]], contrib, unit, failure_hours(ids)
 
 
 try:
     bundle = get_bundle()
 except FileNotFoundError as e:
     st.error(f'저장된 모델이 없습니다. 터미널에서 `python analysis/05_predict_test.py`를 먼저 실행하세요.\n\n{e}')
+    st.stop()
+except ValueError as e:   # 저장 뒤 바뀐 파일, 빠진 값
+    st.error(f'모델 파일을 쓸 수 없습니다. 터미널에서 `python analysis/05_predict_test.py`로 다시 만드세요.\n\n{e}')
     st.stop()
 TH = bundle['threshold']
 CAUTION = bundle.get('caution')          # 주의 모델이 없는 예전 모델 파일이면 경보 1단계만 보여 준다
@@ -86,7 +89,7 @@ st.sidebar.caption(f'경보 모델: {bundle["final"]["model"]} · {bundle["final
                    + (f'주의 기준: 지금 열화 중일 확률 ≥ {CTH:.2f}\n\n' if CAUTION else '')
                    + f'경보 기준: 24시간 안 고장 확률 ≥ {TH:.2f}\n\n모델 저장: {bundle["created_at"]}')
 
-pts, hr, contrib, mnt = get_data(split)
+pts, hr, contrib, contrib_unit, mnt = get_data(split)
 pts_now = pts[pts['T_H'] <= now]
 hr_now = hr[hr['DONE_H'] <= now]
 mnt_now = mnt[mnt['START_H'] <= now].assign(
@@ -289,18 +292,21 @@ elif page == '설비 상세':
         with st.expander('자세히: 모델이 본 이유 (기여도)'):
             cp = after_last_maintenance(pts_now[pts_now['SCENARIO_ID'] == sid], 'T_H')
             if contrib is None:
-                st.write(f'최종 모델({bundle["final"]["model"]})은 나무 여러 개의 투표로 확률을 내서, '
-                         '특징별 기여도를 바로 계산할 수 없습니다. 왼쪽의 신호 상태와 위의 신호 흐름으로 경보 이유를 확인하세요.')
+                st.write(f'최종 모델({bundle["final"]["model"]})은 특징별 기여도를 계산할 수 없는 종류입니다. '
+                         '왼쪽의 신호 상태와 위의 신호 흐름으로 경보 이유를 확인하세요.')
             elif cp.empty:
                 st.write('아직 예측이 없습니다. 정비가 시작되면 정비 전 예측은 쓰지 않고, 재가동 뒤 다음 예측 시점(6시간마다)을 기다립니다.')
             else:
                 cr = contrib.loc[cp.index[-1]].rename('기여도').reset_index().rename(columns={'index': '묶음'})
                 st.altair_chart(alt.Chart(cr).mark_bar().encode(
-                    y=alt.Y('묶음:N', title=None, sort='-x'), x=alt.X('기여도:Q', title='위험을 올린 정도 (로그 오즈)'),
+                    y=alt.Y('묶음:N', title=None, sort='-x'), x=alt.X('기여도:Q', title=f'위험을 올린 정도 ({contrib_unit})'),
                     color=alt.condition('datum.기여도 > 0', alt.value(ALARM_RED), alt.value('#2f5d8a'))
                 ).properties(height=220), width='stretch')
-                st.caption('양수는 위험을 올린 쪽, 음수는 내린 쪽입니다(0 = 학습 세트 평균 시점). '
-                           '네 신호와 결합 점수는 서로 비슷한 정보라 모델 안에서 서로 상쇄될 수 있습니다. '
+                st.caption(f'{cp["T_H"].iloc[-1]:.0f}시간 예측 기준. 양수는 위험을 올린 쪽, 음수는 내린 쪽입니다. '
+                           + ('나무마다 결정 경로를 따라 확률이 바뀐 양을 그 분기에 쓰인 특징 묶음에 나눠 준 값으로, '
+                              '기준값에 모두 더하면 위의 위험 확률이 됩니다. ' if contrib_unit.startswith('확률')
+                              else '0은 학습 세트 평균 시점입니다. ')
+                           + '네 신호와 결합 점수는 서로 비슷한 정보라 모델 안에서 서로 상쇄될 수 있습니다. '
                            '묶음 하나의 크기보다 왼쪽의 신호 상태를 먼저 보세요.')
 
 
@@ -314,7 +320,7 @@ elif page == '모델 정보':
         f'- **학습**: 학습 세트 216개 시나리오의 예측 시점 {bundle["n_train_points"]:,}개\n'
         f'- **경보 기준**: 24시간 안 고장 확률 ≥ {TH:.2f}. 학습 세트 교차검증에서 '
         '점진 고장을 모두 잡고 진짜 오경보가 0인 값 중 가장 낮은 값(오경보 없이 가장 일찍 경보)\n'
-        '- **검증 세트**: 72개 시나리오, 학습·선택에 쓰지 않고 마지막에 한 번만 평가')
+        '- **검증 세트**: 72개 시나리오, 학습에 쓰지 않고 평가에만 사용(모델·기준 선택은 학습 세트 교차검증. 수정 이력은 결과보고서 2절)')
     c1, c2, c3, c4 = st.columns(4)
     c1.metric('AP (순위 능력)', f'{v["point"]["AP"]:.3f}', help='기준 예제 0.806')
     c2.metric('정밀도 / 재현율', f'{v["point"]["정밀도"]:.2f} / {v["point"]["재현율 (점진 고장만)"]:.2f}',

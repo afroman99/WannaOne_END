@@ -155,14 +155,22 @@ def prepare(src, verify=True):
         print(f'{name}: 시나리오 {n_files}개, {n_rows:,}행', flush=True)
 
 
+def _need(path):
+    """변환된 파일이 없으면 무엇을 실행해야 하는지 알려 준다."""
+    if not path.exists():
+        raise FileNotFoundError(f'{path} 가 없다. 먼저 데이터를 변환할 것: '
+                                'python -m src.posko_data --src <POSKO-PdM-Data-pdm-v2.2.0 폴더 경로>')
+    return path
+
+
 def load_scenarios():
-    return pd.read_parquet(OUT_DIR / 'scenarios.parquet')
+    return pd.read_parquet(_need(OUT_DIR / 'scenarios.parquet'))
 
 
 def load_source(file_id, scenarios=None, columns=None):
     """원자료 한 종류를 불러온다. scenarios로 시나리오를 골라 메모리를 아낀다."""
     filters = [('SCENARIO_ID', 'in', list(scenarios))] if scenarios is not None else None
-    df = pd.read_parquet(OUT_DIR / 'raw' / f'{file_id}.parquet',
+    df = pd.read_parquet(_need(OUT_DIR / 'raw' / f'{file_id}.parquet'),
                          columns=columns, filters=filters)
     # 원자료의 문자열 열(string)을 정답 파일과 같은 형식(str)으로 맞춘다.
     # 형식이 다르면 merge_asof 같은 결합이 실패한다
@@ -176,7 +184,7 @@ def load_answer(name):
 
     flow_operations와 flow_inspections는 정답이 아니라 관측 기록이다.
     """
-    return pd.read_parquet(OUT_DIR / f'{name}.parquet')
+    return pd.read_parquet(_need(OUT_DIR / f'{name}.parquet'))
 
 
 if __name__ == '__main__':

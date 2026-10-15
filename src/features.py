@@ -39,6 +39,12 @@ FEATURE_SETS = {
     'elapsed': ['ELAPSED_H', 'SEG_HOURS'],
 }
 
+# 예측 시점 표의 열 (정답 열은 특징이 아니다)
+TARGET_COLS = ['SCENARIO_ID', 'SPLIT', 'OBSERVED_AT', 'T_H', 'risk24', 'RUL_EVENT', 'RUL_HOURS']
+
+# 마지막 정비 유형 특징으로 만드는 정비 유형. 연주 설비 정비 기록에는 이 셋만 있다(점검 inspect는 없음)
+MNT_TYPES = ['partial', 'repair', 'replace']
+
 
 # 1. 예측 시점과 정답
 
@@ -134,6 +140,9 @@ def _maintenance_features(m, t):
     if len(done):
         lastm = done.iloc[-1]
         out['H_SINCE_MNT'] = (t - lastm['END_DT']).total_seconds() / 3600
+        if lastm['MNT_TYPE'] not in MNT_TYPES:
+            # 모르는 유형을 조용히 버리면 '마지막 정비 없음'과 구분되지 않는다
+            raise ValueError(f'모르는 정비 유형: {lastm["MNT_TYPE"]} (MNT_TYPES에 추가하고 모델을 다시 학습할 것)')
         out['LAST_' + lastm['MNT_TYPE'].upper()] = 1
     return out
 
@@ -159,8 +168,6 @@ def make_features(hr, tg):
 
 
 # 3. 한 번에 만들기
-
-TARGET_COLS = ['SCENARIO_ID', 'SPLIT', 'OBSERVED_AT', 'T_H', 'risk24', 'RUL_EVENT', 'RUL_HOURS']
 
 
 def normal_scenarios(scenario_ids):

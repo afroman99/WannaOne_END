@@ -25,7 +25,7 @@ import math
 import re
 from pathlib import Path
 
-from rdflib import BNode, Graph, Literal, Namespace, RDF, RDFS, XSD
+from rdflib import Graph, Literal, Namespace, RDF, RDFS, XSD
 
 ROOT = Path(__file__).resolve().parent.parent
 TBOX = ROOT / 'ontology' / 'casting_dss.ttl'

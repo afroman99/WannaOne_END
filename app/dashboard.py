@@ -247,10 +247,10 @@ def mnt_layer(sid, y_field_max):
 
 
 
-# 의사결정 계산 (정비 책임자 '의사결정'과 현장 '오늘 할 일'이 같이 쓴다)
+# 의사결정 계산 (설비관리자 화면과 작업자 '내 작업'이 같이 쓴다)
 
 def assumptions():
-    """정비 책임자가 정한 가정값 (없으면 기본값 = 모델 파일의 DSS 가정값 + 팀 결정: 정비팀 2팀, 팀당 하루 8공수)"""
+    """설비관리자가 정한 가정값 (없으면 기본값 = 모델 파일의 DSS 가정값 + 팀 결정: 정비팀 2팀, 팀당 하루 8공수)"""
     D = bundle.get('dss')
     base, bc = D['config'], D['config'].costs
     bp = getattr(base, 'parts', PartsPolicy())
@@ -579,7 +579,7 @@ if role == WORKER:
         open_ = mine[mine['상태'] != '완료']
         open_ = open_.assign(_r=(open_['상태'] != '진행 중').astype(int)).sort_values('_r', kind='stable')
         dec_i = dec.set_index('설비 (시나리오)') if len(dec) else pd.DataFrame()
-        busy = set(tf.loc[tf['상태'] != '완료', 'sid'])
+        busy = TASKS.blocked_sids(split, now)
         js = LOG.job_state(split, now, MNT_START)
         done_ = {x for x, v in js.items() if v == '작업 완료'}     # 이번 운전 구간에서 이미 교체를 마친 설비
         urgent_un = [x for x in dec_i.index if dec_i.loc[x, '제약'].startswith('즉시') and x not in busy | done_] if len(dec_i) else []
@@ -680,7 +680,7 @@ else:
     dec, cfg, costs = W['dec'], W['cfg'], W['costs']
     dec_i = dec.set_index('설비 (시나리오)') if len(dec) else pd.DataFrame()
     tf = TASKS.frame(split, now)
-    busy = set(tf.loc[tf['상태'] != '완료', 'sid'])
+    busy = TASKS.blocked_sids(split, now)      # 배정을 막는 작업이 있는 설비 (재생에서 미래에 만든 작업 포함, 배정 규칙과 같음)
     js = LOG.job_state(split, now, MNT_START)
     load = team_load(tf)
     st.subheader('정비 의사결정', icon=':material/balance:')
@@ -755,7 +755,8 @@ else:
         ids_ = tv['설비'].tolist()
         if st.session_state.get('decision_sid') not in t.index:
             st.session_state['decision_sid'] = ids_[0] if ids_ else t.index[0]
-        st.dataframe(tv, hide_index=True, height=320, key='tbl_pick', on_select=lambda: pick_sid('tbl_pick', ids_),
+        tkey = f'tbl_pick_{filt}_{kw.strip()}'       # 필터·검색이 바뀌면 표 선택을 새로 (예전 줄 번호가 다른 설비를 가리키지 않게)
+        st.dataframe(tv, hide_index=True, height=320, key=tkey, on_select=lambda: pick_sid(tkey, ids_),
                      selection_mode='single-row',
                      column_config={'위험 확률': st.column_config.ProgressColumn(min_value=0, max_value=1, format='%.2f')})
         st.caption(f'{len(tv)}대 · 위험한 순서 · 줄을 누르면 오른쪽과 ② 작업 지시가 그 설비로 바뀝니다')
@@ -792,9 +793,10 @@ else:
 
     # ② 작업 지시
     st.markdown('#### ② 작업 지시')
-    existing = TASKS.open_task(split, sid, now)
+    existing = TASKS.blocking(split, sid, now)
     if existing:
-        st.warning(f'이미 열린 작업 #{int(existing["id"])} · {existing["title"]} ({existing["team"]}, {existing["상태"]})이 있어 '
+        when = '' if existing['created_h'] <= now else f' (재생 시각 {existing["created_h"]:.0f}시간에 만든 작업)'
+        st.warning(f'이미 열린 작업 #{int(existing["id"])} · {existing["title"]} ({existing["team"]}){when}이 있어 '
                    '중복 배정은 막힙니다.', icon=':material/block:')
     rec = dec_i.loc[sid, '_e']['best']['선택지'] if sid in dec_i.index else ('점검·부품 준비' if sstage == '주의' else '상태 점검')
     with st.form(f'assign_{sid}', border=True):
@@ -993,8 +995,6 @@ if page == '설비 상세':
                    '판단은 그래프가 아니라 경보 기준과 의사결정 규칙이 합니다. 센서로는 원인 부품을 구분할 수 없어 '
                    '"신호 → 부품" 링크는 두지 않았습니다.')
 
-        st.caption('점검으로 판단한 부품과 교체 뒤 실제로 확인된 원인이 쌓이면, 점검으로 부품을 맞히는 비율을 잽니다. '
-                   '이 비율이 손익분기를 넘으면 "두 부품 교체" 대신 "점검 후 한 부품"을 추천합니다(의사결정 화면의 조치 기록).')
 
 
 # 3. 의사결정 (DSS)
@@ -1014,8 +1014,8 @@ elif page == '의사결정':
     def won(x):
         return f'{x:,.0f}{U}' if not FIELD or abs(x) < 10000 else f'{x / 10000:,.2f}억 원'
 
-    # ② 가정값 (여기서 바꾸면 현장 작업 화면의 할 일도 같은 계획으로 바뀐다)
-    with st.expander('가정값 (바꾸면 추천과 근거, 현장 할 일 목록이 다시 계산됩니다)', expanded=False, icon=':material/tune:'):
+    # ② 가정값 (여기서 바꾸면 위쪽 배정할 경보와 작업자 화면도 같은 계획으로 바뀐다)
+    with st.expander('가정값 (바꾸면 추천·비용·배정할 경보가 다시 계산됩니다)', expanded=False, icon=':material/tune:'):
         assume_note = st.container()          # 지금 가정 요약 (아래에서 계산 뒤 채운다)
         st.markdown('**안전·실행 가능성 (비용보다 먼저 지키는 제약)**')
         a1, a2, a3, a4 = st.columns(4)
@@ -1084,7 +1084,7 @@ elif page == '의사결정':
     if dec.empty:
         st.success('지금 경보가 켜진 설비가 없습니다.', icon=':material/check_circle:')
     else:
-        st.dataframe(dec.drop(columns=['_e', '_slot', '_start']), hide_index=True, column_config={
+        st.dataframe(dec.drop(columns=['_e', '_slot', '_start']).round({'기대 총비용': 0}), hide_index=True, column_config={
             '순위': st.column_config.NumberColumn(format='%d', help='지금 정비할 설비의 정비팀 배정 순서 (위험한 순서)'),
             '추천': st.column_config.TextColumn(width='medium'),
             '정비 완료까지 (h)': st.column_config.NumberColumn(format='%.0f'),
@@ -1118,7 +1118,8 @@ elif page == '의사결정':
         with left:
             ot = pd.DataFrame(e['opts'])
             ot['추천'] = np.where(ot['선택지'] == b['선택지'], '✔', '')
-            st.dataframe(ot[['추천', '선택지', '정비 완료까지(h)', '정비 비용', '생산 차질 비용', '고장 확률', '고장 시 손실', '기대 총비용', '안전 기준 충족']],
+            st.dataframe(ot[['추천', '선택지', '정비 완료까지(h)', '정비 비용', '생산 차질 비용', '고장 확률', '고장 시 손실', '기대 총비용', '안전 기준 충족']]
+                         .round({'정비 비용': 0, '생산 차질 비용': 0, '고장 시 손실': 0, '기대 총비용': 0}),
                          hide_index=True, column_config={
                              '정비 완료까지(h)': st.column_config.NumberColumn(format='%.0f'),
                              '정비 비용': st.column_config.NumberColumn(format='localized'),
@@ -1266,7 +1267,7 @@ elif page == '모델 정보':
         f'- 오경보 {v["point"]["FP"]}개 중 {v["point"]["FP 중 이른 경보"]}개는 고장 24시간보다 일찍 울린 **이른 경보**이고, '
         f'고장 예정이 없는데 울린 진짜 오경보는 {v["point"]["FP 중 진짜 오경보"]}개입니다.\n'
         f'- 놓친 시점 {v["point"]["FN"]}개 중 {v["point"]["FN 중 돌발 고장"]}개는 신호 없이 갑자기 고장 난 돌발 고장입니다.\n'
-        '- 위 숫자는 정답을 알 수 있는 시점만으로 셌습니다. 관측 끝부분의 미확정 경보는 비용 계산기 화면에 있습니다.')
+        '- 위 숫자는 정답을 알 수 있는 시점만으로 셌습니다. 관측 끝부분의 미확정 경보는 "부품 손익" 탭에 있습니다.')
     if CAUTION:
         cv = CAUTION['validation']
         st.subheader('2단계 경보: 주의 단계', icon=':material/notifications:')

@@ -141,6 +141,17 @@ class TaskStore:
         df = df[(df['sid'] == sid) & (df['상태'] != '완료')]
         return None if df.empty else df.iloc[0].to_dict()
 
+    def blocking(self, split, sid, now):
+        """now에 이 설비로 배정하면 막는 작업 (add와 같은 규칙: 완료 전이거나 now에 열려 있던 작업). 없으면 None"""
+        df = self.all(split)
+        df = df[df['sid'] == sid]
+        hit = df[[_conflict(r.created_h, r.completed_h, now) for r in df.itertuples()]]
+        return None if hit.empty else hit.iloc[-1].to_dict()
+
+    def blocked_sids(self, split, now):
+        df = self.all(split)
+        return {r.sid for r in df.itertuples() if _conflict(r.created_h, r.completed_h, now)}
+
     # 쓰기
 
     def add(self, split, sid, title, team, priority, due_h, created_h, guide, reason, option=''):

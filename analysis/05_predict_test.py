@@ -35,7 +35,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from src.evaluate import (CAUTION_MIN_PRECISION, caution_report, caution_sweep, choose_caution_threshold, choose_threshold,
                           degraded_now, evaluate, failure_events, unlabeled_alarms)
-from src.features import build_dataset, make_features, make_prediction_points
+from src.dss import DSSConfig, episodes, failure_curve, simulate
+from src.features import build_dataset, make_features, make_prediction_points, state_outcomes
 from src.model import CAUTION_FINAL, FEATURES, FINAL, MODELS, PRED_STEP_H, fold_features, oof_from_folds
 from src.posko_data import load_answer, load_scenarios
 from src.preprocess import EQP, apply_params, build_hourly
@@ -88,6 +89,12 @@ deg_tr = degraded_now(train).astype(int)
 c_oof = oof_from_folds(make_caution, c_cols, deg_tr, folds)
 c_th = choose_caution_threshold(caution_sweep(train, c_oof, oof, th, ev_train))
 caution_model = make_caution().fit(train[c_cols].values.astype(float), deg_tr)
+
+# 의사결정 지원(DSS): 경보가 처음 켜진 뒤 고장까지 시간 분포 (학습 세트 교차검증 예측의 경보로 추정, src/dss.py)
+so_tr = state_outcomes(train['SCENARIO_ID'].unique().tolist(), step_h=PRED_STEP_H)
+p_tr = so_tr.merge(train[['SCENARIO_ID', 'OBSERVED_AT']].assign(P=oof), on=['SCENARIO_ID', 'OBSERVED_AT'], how='left')['P']
+curve = failure_curve(episodes(so_tr, p_tr.fillna(0).values, th))   # 정답이 없는 관측 끝 시점은 경보 판단에서 뺀다
+print('DSS: 경보 뒤 h시간 안 고장 확률 (학습 세트) ' + ', '.join(f'{h}h {curve[h]:.2f}' for h in [6, 12, 24, 36]))
 print(f'주의 모델: {CAUTION_FINAL["model"]} · {CAUTION_FINAL["features"]} · 주의 기준 {c_th:.2f} '
       f'(학습 세트 교차검증, 주의 정밀도 ≥ {CAUTION_MIN_PRECISION} 중 가장 낮은 값)')
 
@@ -137,10 +144,19 @@ ua = unlabeled_alarms(all_va, model.predict_proba(all_va[cols].values.astype(flo
 va = valid.reset_index(drop=True)
 c_sum, c_ev = caution_report(va, caution_model.predict_proba(va[c_cols].values.astype(float))[:, 1], c_th,
                              model.predict_proba(va[cols].values.astype(float))[:, 1], th)
+so_va = state_outcomes(v_ids, step_h=PRED_STEP_H)
+f_va = make_features(hr[hr['SCENARIO_ID'].isin(v_ids)], so_va)
+p_va = model.predict_proba(f_va[cols].values.astype(float))[:, 1]
+dss_val = {p: simulate(so_va, p_va, th, curve, DSSConfig(), policy=p)['summary'] for p in ['regular', 'now', 'dss']}
+print('DSS 정책 비용 (검증 세트): ' + ' · '.join(f'{r["정책"]} {r["비용"]:.0f}' for r in dss_val.values()))
+
 bundle = {
     'caution': {'model': caution_model, 'threshold': c_th, 'features': c_cols, 'final': CAUTION_FINAL,
                 'min_precision': CAUTION_MIN_PRECISION, 'validation': c_sum, 'validation_events': c_ev},
     'model': model, 'threshold': th, 'features': cols, 'params': params, 'final': FINAL, 'step_h': PRED_STEP_H,
+    # 입력 감시: 학습 세트 특징의 0.1~99.9% 범위 (결측은 무시). 서비스에서 이 범위 밖이면 현장 확인을 띄운다
+    'feature_range': {'lo': train[cols].quantile(0.001).tolist(), 'hi': train[cols].quantile(0.999).tolist()},
+    'dss': {'curve': curve, 'config': DSSConfig(), 'validation': dss_val},
     'created_at': pd.Timestamp.now(tz='Asia/Seoul').strftime('%Y-%m-%d %H:%M'),
     'n_train_points': len(train),
     'validation': {'point': res['point'], 'event': res['event'], 'cost': res['cost'],

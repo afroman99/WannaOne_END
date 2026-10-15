@@ -67,17 +67,17 @@ def make_targets(scenario_ids):
     return tg[['SCENARIO_ID', 'SPLIT', 'OBSERVED_AT', 'T_H', 'risk24', 'RUL_EVENT', 'RUL_HOURS']].reset_index(drop=True)
 
 
-def make_targets_hourly(scenario_ids, step_h=1):
-    """step_h시간 간격 예측 시점의 정답 (정답 파일 targets는 6시간 간격이라 직접 만든다).
+def state_outcomes(scenario_ids, step_h=1):
+    """예측 시점마다 '정비가 없었다면' 고장 날 시각 (make_targets_hourly와 DSS 정책 시뮬레이션이 같이 쓴다).
 
     정답 파일의 잔여수명은 "예측 시각까지의 정비를 반영하고, 이후 추가 정비가 없다고 가정"한 값이다.
     그래서 정기 교체로 실제 고장이 막힌 경우에도 '정비가 없었다면 났을 고장'이 정답에 들어 있고,
     정비 기록만으로는 같은 정답을 만들 수 없다. 대신
     - 같은 정비 상태(마지막으로 시작된 정비가 같은 구간) 안의 6시간 정답 행에서 가상 고장 시각
       (관측 시각 + RUL_HOURS)을 읽는다. 상태 안의 6시간 행끼리 이 시각과 RUL_EVENT는 항상 같다(2026-10-15 확인)
-    - 6시간 행이 없는 상태는 그 뒤에 정비가 없을 때만 '관측 끝까지 고장 없음'으로 둔다 (그 밖은 판단하지 않고 뺀다)
-    정답 규칙(24시간 안 고장 1 / 그 밖 0 / 알 수 없음 제외)은 make_targets와 같다.
-    6시간 시점에서는 make_targets와 정답·잔여수명이 모두 같다 (tests/check_regression.py).
+    - 6시간 행이 없는 상태는 그 뒤에 정비가 없을 때만 '관측 끝까지 고장 없음'으로 둔다 (그 밖은 알 수 없음 NaN)
+    반환: make_prediction_points 결과(정답 열 제외) + STATE(정비 상태 번호), EV(관측 안 고장 1/0/NaN),
+          TSTAR(가상 고장 시각), FOLLOW_H(관측 끝까지 남은 시간). 정답을 알 수 없는 시점도 모두 들어 있다
     """
     scen = load_scenarios().set_index('SCENARIO_ID')
     end = scen['START_AT'] + pd.to_timedelta(scen['DURATION_H'], unit='h')
@@ -95,22 +95,31 @@ def make_targets_hourly(scenario_ids, step_h=1):
                                                   TSTAR=('TSTAR', 'min'), TSTAR_MAX=('TSTAR', 'max'))
     spread = (st['TSTAR_MAX'] - st['TSTAR']).dt.total_seconds() > 1
     if (st['EV'] != st['EV_MIN']).any() or spread.any():
-        raise ValueError('같은 정비 상태 안의 6시간 정답이 서로 다르다. make_targets_hourly의 가정을 다시 확인할 것')
+        raise ValueError('같은 정비 상태 안의 6시간 정답이 서로 다르다. state_outcomes의 가정을 다시 확인할 것')
 
     pts['STATE'] = n_started(pts)
     pts = pts.drop(columns=['risk24', 'RUL_EVENT', 'RUL_HOURS']).merge(
         st[['EV', 'TSTAR']].reset_index(), on=['SCENARIO_ID', 'STATE'], how='left')
     later = pts[['SCENARIO_ID', 'OBSERVED_AT']].merge(mnt[['SCENARIO_ID', 'STRT_DT']], on='SCENARIO_ID')
-    has_later = set(later.loc[later['STRT_DT'] > later['OBSERVED_AT'], 'SCENARIO_ID'] + '|'
-                    + later.loc[later['STRT_DT'] > later['OBSERVED_AT'], 'OBSERVED_AT'].astype(str))
-    no_row = pts['EV'].isna()
-    quiet = no_row & ~(pts['SCENARIO_ID'] + '|' + pts['OBSERVED_AT'].astype(str)).isin(has_later)
+    later = later[later['STRT_DT'] > later['OBSERVED_AT']]
+    has_later = set(zip(later['SCENARIO_ID'], later['OBSERVED_AT']))
+    quiet = pts['EV'].isna() & np.array([k not in has_later for k in zip(pts['SCENARIO_ID'], pts['OBSERVED_AT'])], dtype=bool)
     pts.loc[quiet, 'EV'] = 0
+    pts['FOLLOW_H'] = (pts['SCENARIO_ID'].map(end) - pts['OBSERVED_AT']).dt.total_seconds() / 3600
+    return pts
+
+
+def make_targets_hourly(scenario_ids, step_h=1):
+    """step_h시간 간격 예측 시점의 정답 (정답 파일 targets는 6시간 간격이라 state_outcomes로 만든다).
+
+    정답 규칙(24시간 안 고장 1 / 그 밖 0 / 알 수 없음 제외)은 make_targets와 같다.
+    6시간 시점에서는 make_targets와 정답·잔여수명이 모두 같다 (tests/check_regression.py).
+    """
+    pts = state_outcomes(scenario_ids, step_h=step_h)
     pts['RUL_EVENT'] = pts['EV']
     pts['RUL_HOURS'] = ((pts['TSTAR'] - pts['OBSERVED_AT']).dt.total_seconds() / 3600).where(pts['EV'] == 1)
-    follow = (pts['SCENARIO_ID'].map(end) - pts['OBSERVED_AT']).dt.total_seconds() / 3600
     event = pts['EV'] == 1
-    pts['risk24'] = np.select([event & (pts['RUL_HOURS'] <= 24), event, (pts['EV'] == 0) & (follow >= 24)],
+    pts['risk24'] = np.select([event & (pts['RUL_HOURS'] <= 24), event, (pts['EV'] == 0) & (pts['FOLLOW_H'] >= 24)],
                               [1, 0, 0], default=-1)
     pts = pts[pts['risk24'] >= 0].astype({'T_H': float})   # make_targets와 같은 형식
     return pts[TARGET_COLS].reset_index(drop=True)

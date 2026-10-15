@@ -118,7 +118,8 @@ def score_scenarios(scenario_ids, bundle):
     """시나리오들의 예측 시점(모델의 예측 간격 step_h마다)별 24시간 고장 확률과 경보.
 
     반환
-      pts  예측 시점 표: SCENARIO_ID, OBSERVED_AT, T_H, 특징들, PROB(24시간 안 고장 확률), ALARM(경보 여부)
+      pts  예측 시점 표: SCENARIO_ID, OBSERVED_AT, T_H, 특징들, PROB(24시간 안 고장 확률), ALARM(경보 여부),
+           OOR_N·OOR_FEATS(학습 범위 밖 특징 수·이름, 모델 파일에 범위가 있을 때)
            주의 모델이 있으면 DEGRADED_PROB(지금 열화 중일 확률)과 STAGE(경보 / 주의 / 정상)도 붙는다
       hr   1시간 요약 표: 신호별 표준화 점수(Z_), 평균 점수(SCORE) — 화면의 신호 흐름용
     """
@@ -127,7 +128,15 @@ def score_scenarios(scenario_ids, bundle):
         raise ValueError('시나리오가 없다')
     hr = apply_params(build_hourly(ids), bundle['params'])   # 보정값은 학습 세트에서 정한 그대로
     pts = make_features(hr, make_prediction_points(ids, step_h=bundle.get('step_h', 6)))   # 예전 모델 파일은 6시간
-    pts['PROB'] = bundle['model'].predict_proba(_matrix(pts, bundle['features']))[:, 1]
+    X = _matrix(pts, bundle['features'])
+    pts['PROB'] = bundle['model'].predict_proba(X)[:, 1]
+    rng = bundle.get('feature_range')
+    if rng is not None:   # 입력 감시: 학습 세트에서 본 범위(0.1~99.9%) 밖의 특징 수. 센서 이상이거나 아주 심한 열화
+        lo, hi = np.array(rng['lo']), np.array(rng['hi'])
+        out = (X < lo) | (X > hi)
+        pts['OOR_N'] = out.sum(axis=1)
+        names = np.array(bundle['features'])
+        pts['OOR_FEATS'] = [', '.join(names[r]) for r in out]
     pts['ALARM'] = pts['PROB'] >= bundle['threshold']
     c = bundle.get('caution')
     if c:   # 2단계 경보: 경보가 아니어도 열화 확률이 주의 기준 이상이면 주의

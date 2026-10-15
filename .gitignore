@@ -200,3 +200,10 @@ models/
 # 개인 도구 설정 (AI 도구용 안내 링크, 화면 미리보기 설정)
 .agents/
 .claude/
+
+# 대시보드 비밀값 (비밀번호 해시 등). 클라우드에서는 앱 설정의 Secrets에 넣는다
+.streamlit/secrets.toml
+
+# 클라우드용 대시보드 데이터 (src/app_data.py가 만든다). 강사 제공 데이터에서 나온 값이라
+# 저장소가 비공개이고 강사 허락을 받은 뒤에만 커밋한다 (reports/보안_점검.md)
+app_data/

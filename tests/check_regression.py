@@ -12,6 +12,9 @@
   5. 비용 곡선: 대시보드 비용 계산기가 평가 함수(src/evaluate.py)와 같은 비용을 내는가 (손익분기 0.60)
   6. 안전장치: 모르는 정비 유형, 빠진 특징, 바뀐 모델 파일을 조용히 넘기지 않고 멈추는가
   7. 1시간 정답: make_targets_hourly가 6시간 시점에서 정답 파일 기준(make_targets)과 같은가
+  8. 의사결정 지원(DSS): 모델 파일의 정책 비용(검증 세트 ① 1056 ② 980 ③ 900)과, 정기 교체 직전이면 기다리고 준비가 안 되면 지금 교체하는가
+  9. 보안 (reports/보안_점검.md): 클라우드용 데이터(app_data)가 서비스 예측과 같고 원자료·모델 객체가 없는가, 바뀐 파일을 막는가,
+     비밀번호 확인이 맞는가, 입력 감시 범위가 모델 파일에 있는가
 
 숫자를 일부러 바꾼 경우(모델 개선 등)에는 보고서를 고친 뒤 EXPECTED도 함께 고친다.
 """
@@ -36,6 +39,7 @@ from src.serving import MODEL_PATH, _forest_contributions, _matrix, cost_curve, 
 EXPECTED = {
     'threshold': 0.56, 'caution_threshold': 0.57, 'AP': 0.866, '감지': 14, '고장': 16, '비용 두 부품': 1020,
     'test_points': 5028, 'test_alarms': 554, 'test_alarm_scenarios': 18, 'breakeven_p': 0.60, 'step_h': 1,
+    'dss_cost': {'regular': 1056, 'now': 980, 'dss': 900},
 }
 
 results = []
@@ -144,6 +148,50 @@ h6 = make_targets_hourly(known, step_h=6)
 check('6시간 간격으로 만들면 정답 파일 기준과 똑같다 (잔여수명은 부동소수 오차 안)',
       h6.drop(columns='RUL_HOURS').equals(ref.drop(columns='RUL_HOURS'))
       and np.allclose(h6['RUL_HOURS'].fillna(-1), ref['RUL_HOURS'].fillna(-1)))
+
+print('\n8. 의사결정 지원 (DSS)')
+from src.dss import DSSConfig, decide
+D = bundle.get('dss')
+check('모델 파일에 DSS 정보가 있다', D is not None)
+if D:
+    got = {p: round(r['비용']) for p, r in D['validation'].items()}
+    check('검증 세트 정책 비용', got == EXPECTED['dss_cost'], str(got))
+    check('정기 교체 3시간 전 경보면 기다린다', decide({'WAIT_H': 3}, D['curve'], DSSConfig(), 'dss')[0] == 'wait')
+    check('계획이 없으면 지금 교체', decide({'WAIT_H': np.nan}, D['curve'], DSSConfig(), 'dss')[0] == 'now')
+    check('준비 시간 24시간이면 3시간 뒤 정기 교체를 기다리지 않는다',
+          decide({'WAIT_H': 3}, D['curve'], DSSConfig(prep_h=24), 'dss')[0] == 'now')
+    check('안전 기준을 넘으면 지금 교체 (30시간 기다림)',
+          decide({'WAIT_H': 30}, D['curve'], DSSConfig(), 'dss')[0] == 'now')
+
+print('\n9. 보안')
+import json
+import tempfile as _tf
+from src import app_data
+from src.auth import hash_password, verify
+check('입력 감시 범위가 모델 파일에 있다', 'feature_range' in bundle and len(bundle['feature_range']['lo']) == len(bundle['features']))
+check('서비스 예측에 입력 감시 열이 있다', {'OOR_N', 'OOR_FEATS'} <= set(pts.columns))
+salt, dig, it = hash_password('test-only-password', iterations=1000)
+check('비밀번호 확인: 맞으면 통과, 틀리면 거부', verify('test-only-password', salt, dig, it) and not verify('wrong', salt, dig, it))
+with _tf.TemporaryDirectory() as d:
+    app_data.export(d)
+    meta, data = app_data.load(d)
+    p_app = data['test'][0]
+    check('클라우드용 데이터의 테스트 예측이 서비스 예측과 같다',
+          np.allclose(p_app['PROB'].values, pts['PROB'].values) and (p_app['STAGE'].values == pts['STAGE'].values).all())
+    text = (Path(d) / 'meta.json').read_text(encoding='utf-8')
+    names = sorted(f.name for f in Path(d).iterdir())
+    check('클라우드용 데이터에 모델 객체·원자료 특징이 없다 (Parquet·JSON만, 1시간 점수까지만)',
+          all(n.endswith(('.parquet', '.json')) for n in names) and 'RandomForest' not in text
+          and not any(c in data['test'][1].columns for c in ['LOAD', 'WD-LOD', 'MLD-LVL']))
+    check('클라우드용 정책 비용이 모델 파일과 같다', {k: round(v['비용']) for k, v in meta['dss']['validation'].items()} == EXPECTED['dss_cost'])
+    with open(Path(d) / 'test_pts.parquet', 'ab') as f:
+        f.write(b'0')
+    check('바뀐 클라우드용 파일은 불러오지 않는다', raises(lambda: app_data.load(d), ValueError))
+from src.posko_data import _check_manifest
+check('manifest의 경로 조작 값(../)을 막는다',
+      raises(lambda: _check_manifest({'files': [{'id': '../x', 'scenarioId': 'S0001', 'chunks': []}], 'scenarios': []}), ValueError)
+      and raises(lambda: _check_manifest({'files': [{'id': 'casting', 'scenarioId': 'S0001',
+                                                     'chunks': [{'sha256': '../../etc/passwd'}]}], 'scenarios': []}), ValueError))
 
 n_fail = sum(not ok for _, ok in results)
 print(f'\n결과: {len(results) - n_fail}/{len(results)}개 통과')

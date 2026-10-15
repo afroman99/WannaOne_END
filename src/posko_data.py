@@ -23,6 +23,7 @@ manifest.json의 순서대로 이어 붙여 원자료 종류별 Parquet 파일 �
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -44,6 +45,26 @@ ANSWER_DIRS = {
     'flow_inspections': 'flow/inspections',
     'flow_quality': 'flow/quality',
 }
+
+
+# manifest.json의 값은 받은 데이터에서 온 것이라 파일 경로에 쓰기 전에 형식을 확인한다 (경로 조작 방지, reports/보안_점검.md)
+_SAFE_ID = re.compile(r'^[a-z0-9][a-z0-9-]{0,63}$')       # 원자료 종류 (출력 파일 이름이 된다)
+_SAFE_SHA = re.compile(r'^[0-9a-f]{64}$')                  # 청크 파일 이름
+_SAFE_SCEN = re.compile(r'^S\d{4}$')
+
+
+def _check_manifest(manifest):
+    for e in manifest['files']:
+        if not _SAFE_ID.match(str(e['id'])):
+            raise ValueError(f'manifest의 원자료 이름이 이상하다: {e["id"]!r}')
+        if not _SAFE_SCEN.match(str(e['scenarioId'])):
+            raise ValueError(f'manifest의 시나리오 ID가 이상하다: {e["scenarioId"]!r}')
+        for chunk in e['chunks']:
+            if not _SAFE_SHA.match(str(chunk['sha256'])):
+                raise ValueError(f'manifest의 청크 이름이 SHA-256 형식이 아니다: {chunk["sha256"]!r}')
+    for sc in manifest['scenarios']:
+        if not _SAFE_SCEN.match(str(sc['id'])):
+            raise ValueError(f'manifest의 시나리오 ID가 이상하다: {sc["id"]!r}')
 
 
 def _sha256(path):
@@ -134,6 +155,7 @@ def _convert_answer(src, name, sub):
 def prepare(src, verify=True):
     src = Path(src).expanduser()
     manifest = json.loads((src / 'manifest.json').read_text(encoding='utf-8'))
+    _check_manifest(manifest)
     (OUT_DIR / 'raw').mkdir(parents=True, exist_ok=True)
 
     scen = pd.DataFrame(manifest['scenarios']).rename(columns={

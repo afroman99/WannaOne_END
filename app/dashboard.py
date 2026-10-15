@@ -15,11 +15,13 @@
 화면
   1. 전체 현황    설비(시나리오)별 지금 단계(정상·주의·경보), 위험한 순서, 부품 소요 예측
   2. 설비 상세    위험 확률·열화 확률과 네 신호의 흐름, 정비 기록, 경보 이유, 조치 안내
-  3. 모델 정보    경보·주의 모델과 기준, 검증 세트 성능
-  4. 비용 계산기  원인 부품을 맞힐 확률에 따른 비용 (팀 결정 C)
+  3. 의사결정     경보 설비마다 지금 교체 / 정기 교체 때 함께의 기대 비용 비교와 추천 (src/dss.py), 가정값 조정
+  4. 모델 정보    경보·주의 모델과 기준, 검증 세트 성능
+  5. 비용 계산기  원인 부품을 맞힐 확률에 따른 비용 (팀 결정 C)
 """
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import altair as alt
@@ -30,9 +32,18 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from src.posko_data import load_scenarios
+from src.dss import fail_prob, options, plans, recommend
+from src import app_data
+from src.auth import require_login
 from src.serving import cost_curve, explain, failure_hours, load_bundle, score_scenarios
 
 st.set_page_config(page_title='연주 설비 조기경보', page_icon='⚠️', layout='wide')
+
+# 실행 방식 (reports/보안_점검.md)
+#   로컬: data/posko/ 원자료와 models/risk24.joblib로 직접 계산한다 (내 컴퓨터 안에서만 열림, 비밀번호 없음)
+#   클라우드: 원자료가 없고 app_data/만 있다. 미리 계산한 결과만 읽고(모델 파일을 불러오지 않음), 비밀번호를 요구한다
+CLOUD = not (ROOT / 'data' / 'posko').exists() and app_data.available()
+require_login(st, CLOUD)
 
 SIGNAL_NAMES = {'Z_MLD-AMP': '몰드 레벨 진폭', 'Z_CONTROL_DELAY': '제어 지연',
                 'Z_WDL': '인발 부하', 'Z_OSC-STK': '진동 스트로크'}
@@ -48,12 +59,20 @@ STAGE_COLORS = alt.Scale(domain=[WARN, CAU, NORM], range=[ALARM_RED, CAUTION_YEL
 # 데이터 불러오기 (처음 한 번만 계산하고 기억해 둔다)
 
 @st.cache_resource
+def get_app_data():
+    return app_data.load()
+
+
+@st.cache_resource
 def get_bundle():
-    return load_bundle()
+    return get_app_data()[0] if CLOUD else load_bundle()
 
 
 @st.cache_data(show_spinner='센서 데이터를 요약하고 예측하는 중...')
 def get_data(split):
+    if CLOUD:
+        pts, hr, contrib, unit, mnt, _ = get_app_data()[1][split]
+        return pts, hr, contrib, unit, mnt
     bundle = get_bundle()
     ids = load_scenarios().query('SPLIT == @split')['SCENARIO_ID'].tolist()
     pts, hr = score_scenarios(ids, bundle)
@@ -64,11 +83,11 @@ def get_data(split):
 
 try:
     bundle = get_bundle()
-except FileNotFoundError as e:
-    st.error(f'저장된 모델이 없습니다. 터미널에서 `python analysis/05_predict_test.py`를 먼저 실행하세요.\n\n{e}')
-    st.stop()
-except ValueError as e:   # 저장 뒤 바뀐 파일, 빠진 값
-    st.error(f'모델 파일을 쓸 수 없습니다. 터미널에서 `python analysis/05_predict_test.py`로 다시 만드세요.\n\n{e}')
+except (FileNotFoundError, ValueError) as e:   # 없는 파일, 저장 뒤 바뀐 파일, 빠진 값
+    print(f'[dashboard] 모델·데이터를 불러오지 못함: {e!r}', file=sys.stderr)   # 자세한 내용(파일 경로 등)은 서버 로그에만
+    st.error('모델·데이터 파일을 쓸 수 없습니다. 관리자에게 문의하세요.' if CLOUD else
+             '모델 파일을 쓸 수 없습니다. 터미널에서 `python analysis/05_predict_test.py`를 실행해 다시 만드세요. '
+             '(자세한 내용은 터미널 로그)')
     st.stop()
 TH = bundle['threshold']
 STEP = bundle.get('step_h', 6)           # 예측 간격(시간). 예전 모델 파일은 6시간
@@ -79,7 +98,7 @@ CTH = CAUTION['threshold'] if CAUTION else None
 # 사이드바: 화면, 데이터 세트, 지금 시각
 
 st.sidebar.title('연주 설비 조기경보')
-page = st.sidebar.radio('화면', ['전체 현황', '설비 상세', '모델 정보', '비용 계산기'])
+page = st.sidebar.radio('화면', ['전체 현황', '설비 상세', '의사결정', '모델 정보', '비용 계산기'])
 split_label = st.sidebar.radio('데이터 세트', list(SPLITS))
 split = SPLITS[split_label]
 now = st.sidebar.slider('지금 시각 (시나리오 시작 후 경과 시간, h)', 0, 72, 72, step=1,
@@ -91,6 +110,21 @@ st.sidebar.caption(f'경보 모델: {bundle["final"]["model"]} · {bundle["final
                    + f'경보 기준: 24시간 안 고장 확률 ≥ {TH:.2f}\n\n모델 저장: {bundle["created_at"]}')
 
 pts, hr, contrib, contrib_unit, mnt = get_data(split)
+
+
+@st.cache_data
+def get_plans(split):
+    """정기 교체 계획 (calendar 표, 미리 안다고 가정): 시나리오 시작 후 시각(h)과 계획된 부품"""
+    if CLOUD:
+        return get_app_data()[1][split][5]
+    ids = load_scenarios().query('SPLIT == @split')['SCENARIO_ID'].tolist()
+    start = load_scenarios().set_index('SCENARIO_ID')['START_AT']
+    pl = plans(ids)
+    pl['PLAN_H'] = (pl['PLAN_START'] - pl['SCENARIO_ID'].map(start)).dt.total_seconds() / 3600
+    return pl
+
+
+PART_NAMES = {'valve': '밸브', 'oscillator': '진동장치'}
 pts_now = pts[pts['T_H'] <= now]
 hr_now = hr[hr['DONE_H'] <= now]
 mnt_now = mnt[mnt['START_H'] <= now].assign(
@@ -237,6 +271,11 @@ elif page == '설비 상세':
         st.warning(f'정비가 시작돼 정비 전 예측은 더 이상 쓰지 않습니다. 재가동 뒤 다음 예측 시점({STEP}시간마다)에 다시 예측합니다.')
     else:
         st.success('지금은 열화 신호가 없고, 24시간 안 고장 위험이 낮습니다.' if CAUTION else '지금은 24시간 안 고장 위험이 낮습니다.')
+    last_p = after_last_maintenance(pts_now[pts_now['SCENARIO_ID'] == sid], 'T_H').tail(1)
+    if 'OOR_N' in last_p and len(last_p) and last_p['OOR_N'].iloc[0] > 0:
+        st.warning(f'**입력 감시** · 마지막 예측({last_p["T_H"].iloc[0]:.0f}시간)의 특징 {int(last_p["OOR_N"].iloc[0])}개가 '
+                   f'학습 때 본 범위(0.1~99.9%) 밖입니다: {last_p["OOR_FEATS"].iloc[0]}. '
+                   '아주 심한 열화이거나 센서 이상일 수 있어, 모델 확률만 믿지 말고 현장에서 센서와 설비를 확인하세요.')
 
     # 위험 확률 흐름
     p = pts_now[pts_now['SCENARIO_ID'] == sid].rename(columns={'STAGE': '단계'})
@@ -318,7 +357,214 @@ elif page == '설비 상세':
                            '묶음 하나의 크기보다 왼쪽의 신호 상태를 먼저 보세요.')
 
 
-# 3. 모델 정보
+# 3. 의사결정 (DSS)
+
+elif page == '의사결정':
+    D = bundle.get('dss')
+    st.header(f'의사결정 · 지금 {now}시간 · {split_label}')
+    if not D:
+        st.warning('이 모델 파일에는 의사결정 정보가 없습니다. 터미널에서 `python analysis/05_predict_test.py`로 다시 만드세요.')
+        st.stop()
+    st.caption('경보가 켜진 설비마다 정비 선택지(지금 / N시간 뒤 / 다음 정기 교체 때)의 **기대 총비용 = 정비 비용 + 생산 차질 비용 + '
+               '고장 확률 × 고장 시 손실**을 비교해 추천합니다. 안전 기준과 실행 가능성(정비팀·부품 준비)은 비용보다 먼저 지킵니다. '
+               '판단은 검증 가능한 예측값과 계산·규칙으로만 하며, 최종 결정은 정비 책임자가 합니다.')
+
+    # ① 이 시스템이 없었다면 → 있으면 (검증 세트 시뮬레이션)
+    sim = D.get('validation')
+    if sim:
+        st.subheader('이 시스템이 없었다면 → 있으면 (검증 세트 72대 시뮬레이션)')
+        r1, r2, r3 = sim['regular'], sim['now'], sim['dss']
+        k1, k2, k3 = st.columns(3)
+        k1.metric('① 시스템 없음: 정기 교체만', f'{r1["비용"]:.0f}점', f'고장 {r1["고장"]}건', delta_color='off')
+        k2.metric('② 경보만: 켜지면 즉시 교체', f'{r2["비용"]:.0f}점', f'{r2["비용"] - r1["비용"]:+.0f}점 · 고장 {r2["고장"]}건',
+                  delta_color='inverse')
+        k3.metric('③ 경보 + 의사결정 지원', f'{r3["비용"]:.0f}점', f'{r3["비용"] - r1["비용"]:+.0f}점 · 고장 {r3["고장"]}건',
+                  delta_color='inverse')
+        st.caption(f'정비 관리자가 예측 없이 정기 교체만 하면 고장 {r1["고장"]}건이 그대로 일어납니다. 경보를 따라 바로 교체하면 고장이 '
+                   f'{r2["고장"]}건으로 줄지만, 정기 교체 직전의 경보까지 따로 교체해 정비가 {r2["정비 횟수"]}번 듭니다. '
+                   f'의사결정 지원은 그중 {r3["정기 교체 때"]}건을 정기 교체 때 함께 처리해 계획 밖 정지를 '
+                   f'{r2["계획 밖 정지(h)"]:.0f} → {r3["계획 밖 정지(h)"]:.0f}시간으로 줄입니다. '
+                   f'**시뮬레이션에 따른 예상 절감액: {r1["비용"] - r3["비용"]:.0f}점 ({(r1["비용"] - r3["비용"]) / r1["비용"]:.0%}, ① 대비)**. '
+                   '점수는 데이터셋 비용 규칙이며 실제 돈이 아닙니다. 정답을 알 수 없는 관측 끝부분의 경보는 빠져 있습니다(analysis/10_dss_policy.py).')
+
+    # ② 가정값
+    base = D['config']
+    bc = base.costs
+    with st.expander('가정값 (바꾸면 추천과 근거가 다시 계산됩니다)', expanded=False):
+        st.markdown('**안전·실행 가능성 (비용보다 먼저 지키는 제약)**')
+        a1, a2, a3, a4 = st.columns(4)
+        safety = a1.slider('안전 기준: 정비 완료 전 고장 확률 상한', 0.0, 0.5, float(base.safety_max), 0.01)
+        prep = a2.slider('부품 준비 시간 (조달 + 교체, h)', 4, 36, int(base.prep_h), 1,
+                         help='데이터셋 비용 규칙은 교체 4시간. 부품을 조달해야 하면 더 길어집니다.')
+        crew_wait = a3.slider('정비팀이 시작할 수 있을 때까지 (h)', 0, 24, int(base.crew_wait_h), 1)
+        n_crews = a4.number_input('동시에 교체할 수 있는 정비팀 수', 1, 10, 2, 1,
+                                  help='경보 설비가 이보다 많으면 위험한 순서대로 차례를 기다립니다.')
+        st.markdown('**비용 (점, 기본값 = 데이터셋 비용 규칙)**')
+        b1, b2, b3, b4 = st.columns(4)
+        down_h = b1.number_input('생산 차질 비용 (정지 1시간)', 0.0, 50.0, float(bc.downtime_h), 0.5)
+        penalty = b2.number_input('고장 벌점 (안전·품질 영향)', 0.0, 200.0, float(bc.failure_penalty), 5.0)
+        p_other = b3.slider('함께 바꾸는 부품이 실제 원인일 확률', 0.0, 1.0, float(base.p_other_needed), 0.05,
+                            help='센서로 원인 부품을 구분할 수 없어 기본값은 0.5입니다.')
+        max_wait = b4.slider('기다릴 수 있는 최대 시간 (h)', 0, 72, int(base.max_wait_h), 1)
+        st.markdown('**N시간 뒤 정비 선택지 (예: 생산 영향이 적은 시간대)**')
+        d1, d2 = st.columns(2)
+        delay_h = d1.slider('N시간 뒤 (0 = 쓰지 않음)', 0, 48, 0, 1)
+        delay_rate = d2.number_input('그 시간대 생산 차질 비용 (정지 1시간)', 0.0, 50.0, float(bc.downtime_h), 0.5)
+    costs = replace(bc, downtime_h=down_h, failure_penalty=penalty)
+    cfg = replace(base, safety_max=safety, prep_h=prep, crew_wait_h=crew_wait, p_other_needed=p_other,
+                  max_wait_h=max_wait, costs=costs)
+    st.caption(f'지금 가정: 고장 시 손실 = 복구 {costs.repair:.0f} + 복구 {costs.repair_h:.0f}시간 × 생산 차질 {costs.downtime_h:.1f} '
+               f'+ 고장 벌점 {costs.failure_penalty:.0f} = **{costs.failure_loss:.0f}점** · 안전 기준 {cfg.safety_max:.2f} · '
+               f'부품 준비 {cfg.prep_h:.0f}시간 · 정비팀 {n_crews}팀. 고장 확률은 학습 세트에서 경보 뒤 고장까지 걸린 시간 분포로 계산합니다.')
+
+    # ③ 정비 결정 목록: 추천, 우선순위, 일정
+    curve = D['curve']
+    t = status_table()
+    pl = get_plans(split)
+    since = after_last_maintenance(pts_now, 'T_H')
+    first_alarm_now = since[since['ALARM']].groupby('SCENARIO_ID')['T_H'].min()
+    dly = delay_h if delay_h > 0 else None
+
+    def evaluate_options(sid, crew_extra=0.0, p_override=None):
+        t_a = first_alarm_now.get(sid, np.nan)
+        nxt = pl[(pl['SCENARIO_ID'] == sid) & (pl['PLAN_H'] > now)].sort_values('PLAN_H').head(1)
+        wait_h = float(nxt['PLAN_H'].iloc[0] - now) if len(nxt) else np.nan
+        part = PART_NAMES.get(nxt['PLAN_PART'].iloc[0], nxt['PLAN_PART'].iloc[0]) if len(nxt) else None
+        elapsed = max(0.0, now - t_a) if pd.notna(t_a) else 0.0
+        c = replace(cfg, crew_wait_h=cfg.crew_wait_h + crew_extra)
+        opts = options(wait_h, curve, c, elapsed, delay_h=dly, delay_downtime_h=delay_rate, p_override=p_override)
+        best, urgent = recommend(opts)
+        return {'t_a': t_a, 'wait_h': wait_h, 'part': part, 'elapsed': elapsed, 'opts': opts, 'best': best, 'urgent': urgent}
+
+    alarm_ids = t.index[t['상태'] == WARN].tolist()
+    first = {sid: evaluate_options(sid) for sid in alarm_ids}
+    # 우선순위: 지금 정비가 필요한 설비를 위험한 순서로(한 차례 미루면 고장 확률이 큰 순서) 정비팀에 배정한다
+    need_crew = sorted([s for s in alarm_ids if not first[s]['best']['선택지'].startswith('다음 정기')],
+                       key=lambda s: -fail_prob(curve, first[s]['elapsed'], first[s]['opts'][0]['정비 완료까지(h)'] + costs.replace_h))
+    rows = []
+    for k, sid in enumerate(need_crew + [s for s in alarm_ids if s not in need_crew]):
+        slot = k // n_crews if sid in need_crew else 0
+        e = evaluate_options(sid, crew_extra=slot * costs.replace_h) if slot else first[sid]
+        b = e['best']
+        rows.append({'순위': k + 1 if sid in need_crew else None, '설비 (시나리오)': sid, '추천': b['선택지'],
+                     '정비 완료까지 (h)': b['정비 완료까지(h)'], '기대 총비용': b['기대 총비용'], '완료 전 고장 확률': b['고장 확률'],
+                     '제약': ('즉시 조치: 지금 해도 완료 전 고장 확률이 안전 기준 초과' if first[sid]['urgent'] else
+                            '안전 기준 초과: 정비팀 부족 (팀 추가 필요)' if e['urgent'] else
+                            (f'충족 (정비팀 차례 대기 {slot * costs.replace_h:.0f}시간)' if slot else '충족')),
+                     '첫 경보 (h)': e['t_a'],
+                     '다음 정기 교체': f'{e["wait_h"]:.0f}시간 뒤 ({e["part"]})' if pd.notna(e['wait_h']) else '계획 없음',
+                     '_e': e, '_slot': slot})
+    dec = pd.DataFrame(rows)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric('경보 설비', len(dec))
+    c2.metric('지금 정비 (정비팀 배정)', len(need_crew))
+    c3.metric('정기 교체 때 함께', int(dec['추천'].str.startswith('다음 정기').sum()) if len(dec) else 0)
+    c4.metric('일정 제약 충족', f'{int(dec["제약"].str.startswith("충족").sum())}/{len(dec)}' if len(dec) else '—',
+              help='정비팀 차례를 기다려도 정비가 끝나기 전 고장 확률이 안전 기준 이하인 설비 수')
+    if len(dec) and dec['제약'].str.startswith('즉시').any():
+        st.error('**즉시 조치 대상**: ' + ', '.join(dec.loc[dec['제약'].str.startswith('즉시'), '설비 (시나리오)'])
+                 + ' — 경보가 켜진 지 오래돼 지금 교체해도 완료 전 고장 확률이 안전 기준을 넘습니다. 가장 먼저 정비하세요. '
+                 '(이 화면은 지나간 데이터를 재생하므로, 실제로는 조치하지 않은 경보가 쌓여 보일 수 있습니다.)')
+
+    st.subheader('정비 결정 목록 (우선순위·일정)')
+    if dec.empty:
+        st.success('지금 경보가 켜진 설비가 없습니다.')
+    else:
+        st.dataframe(dec.drop(columns=['_e', '_slot']), hide_index=True, column_config={
+            '순위': st.column_config.NumberColumn(format='%d', help='지금 정비할 설비의 정비팀 배정 순서 (위험한 순서)'),
+            '추천': st.column_config.TextColumn(width='medium'),
+            '정비 완료까지 (h)': st.column_config.NumberColumn(format='%.0f'),
+            '기대 총비용': st.column_config.NumberColumn(format='%.0f점'),
+            '완료 전 고장 확률': st.column_config.NumberColumn(format='%.2f'),
+            '첫 경보 (h)': st.column_config.NumberColumn(format='%d')})
+        st.caption(f'정비팀 {n_crews}팀이 한 번에 {n_crews}대씩 교체({costs.replace_h:.0f}시간)합니다. 차례를 기다리는 설비는 그만큼 늦게 끝나는 것으로 다시 계산합니다.')
+
+        # ④ 설비별 근거: 선택지 비교와 산정 근거
+        sid = st.selectbox('설비를 골라 근거 보기', dec['설비 (시나리오)'].tolist())
+        e = dec.set_index('설비 (시나리오)').loc[sid, '_e']
+        slot = dec.set_index('설비 (시나리오)').loc[sid, '_slot']
+        override = st.checkbox('고장 확률을 직접 입력 (현장 판단으로 덮어쓰기)', help='점검 결과 등 현장 판단이 있을 때 모델 확률 대신 씁니다.')
+        if override:
+            cols_o = st.columns(len(e['opts']))
+            keys = {'지금 두 부품 교체': '지금 두 부품 교체', '다음 정기 교체 때 두 부품 함께': '정기 교체 때'}
+            po = {}
+            for col, o in zip(cols_o, e['opts']):
+                key = keys.get(o['선택지'], 'N시간 뒤 교체')
+                po[key] = col.number_input(f'{o["선택지"]}: 완료 전 고장 확률', 0.0, 1.0, float(round(o['고장 확률'], 2)), 0.01, key=f'po_{sid}_{key}')
+            e = evaluate_options(sid, crew_extra=slot * costs.replace_h, p_override=po)
+        b = e['best']
+        msg = f'**{sid} · 추천: {b["선택지"]}**' + (f' ({e["urgent"]})' if e['urgent'] else '')
+        (st.info if b['선택지'].startswith('다음 정기') else st.warning)(
+            msg + f'\n\n기대 총비용 {b["기대 총비용"]:.0f}점 = (1 − 고장 확률 {b["고장 확률"]:.2f}) × (정비 {b["정비 비용"]:.0f} + 생산 차질 {b["생산 차질 비용"]:.0f})'
+            f' + {b["고장 확률"]:.2f} × 고장 시 손실 {b["고장 시 손실"]:.0f}')
+        left, right = st.columns([1.3, 1])
+        with left:
+            ot = pd.DataFrame(e['opts'])
+            ot['추천'] = np.where(ot['선택지'] == b['선택지'], '✔', '')
+            st.dataframe(ot[['추천', '선택지', '정비 완료까지(h)', '정비 비용', '생산 차질 비용', '고장 확률', '고장 시 손실', '기대 총비용', '안전 기준 충족']],
+                         hide_index=True, column_config={
+                             '정비 완료까지(h)': st.column_config.NumberColumn(format='%.0f'),
+                             '정비 비용': st.column_config.NumberColumn(format='%.0f'),
+                             '생산 차질 비용': st.column_config.NumberColumn(format='%.0f'),
+                             '고장 확률': st.column_config.NumberColumn('완료 전 고장 확률', format='%.2f'),
+                             '고장 시 손실': st.column_config.NumberColumn(format='%.0f'),
+                             '기대 총비용': st.column_config.NumberColumn(format='%.0f')})
+            st.markdown('**산정 근거**\n' + '\n'.join(f'- {o["선택지"]}: {o["근거"]}' for o in e['opts'])
+                        + f'\n- 고장 확률: 학습 세트에서 경보가 처음 켜진 뒤 실제 고장까지 걸린 시간 분포(카플란-마이어). '
+                          f'이 설비는 경보 뒤 {e["elapsed"]:.0f}시간 동안 고장이 없었다는 조건으로 계산'
+                        + ('\n- 고장 확률은 현장 판단으로 덮어쓴 값' if override else ''))
+            wait = next((o for o in e['opts'] if o['선택지'].startswith('다음 정기')), None)
+            if wait is not None:
+                c_wait = wait['정비 비용'] + wait['생산 차질 비용']
+                even = (e['opts'][0]['기대 총비용'] - c_wait) / (costs.failure_loss - c_wait)
+                st.caption((f'추천이 바뀌는 경계: 안전 기준을 {wait["고장 확률"]:.2f}보다 낮추면 "지금 교체". ' if wait['고장 확률'] >= 0.005 else
+                            '정기 교체 전까지 고장 확률이 거의 0이라 안전 기준과 상관없이 기다릴 수 있습니다. ')
+                           + f'비용만 보면 정기 교체 전 고장 확률이 {even:.2f}를 넘을 때 지금 교체가 더 쌉니다. '
+                           '부품 준비 시간이 정기 교체보다 길어지면 "지금 교체"로 바뀝니다.')
+            elif pd.isna(e['wait_h']):
+                st.caption('다음 정기 교체 계획이 없어 지금(또는 N시간 뒤) 교체만 가능합니다.')
+        with right:
+            cv = pd.DataFrame({'h': np.arange(0, 49)})
+            cv['p'] = [fail_prob(curve, e['elapsed'], h) for h in cv['h']]
+            marks = [alt.Chart(cv).mark_line(color='#2f5d8a').encode(
+                x=alt.X('h:Q', title='지금부터 시간 (h)'), y=alt.Y('p:Q', title='그 안에 고장 날 확률', scale=alt.Scale(domain=[0, 1])),
+                tooltip=[alt.Tooltip('h', title='시간(h)'), alt.Tooltip('p', title='고장 확률', format='.2f')]),
+                alt.Chart(pd.DataFrame({'y': [cfg.safety_max]})).mark_rule(color=ALARM_RED, strokeDash=[6, 3]).encode(y='y:Q')]
+            pts_o = pd.DataFrame([{'h': o['정비 완료까지(h)'], 'p': fail_prob(curve, e['elapsed'], o['정비 완료까지(h)']), '선택지': o['선택지']}
+                                  for o in e['opts']])
+            marks.append(alt.Chart(pts_o).mark_point(size=90, filled=True, color='#4a9b5e').encode(
+                x='h:Q', y='p:Q', tooltip=['선택지', alt.Tooltip('h', title='정비 완료(h)'), alt.Tooltip('p', title='고장 확률', format='.2f')]))
+            st.altair_chart(alt.layer(*marks).properties(height=240), width='stretch')
+            st.caption('파란 선: 지금부터 h시간 안에 고장 날 확률 · 초록 점: 선택지별 정비 완료 시점 · 빨간 점선: 안전 기준')
+
+    # ⑤ 주의 설비
+    cau = t.index[t['상태'] == CAU].tolist()
+    if cau:
+        st.subheader('주의 설비 (아직 교체 판단 전: 준비)')
+        nxt = pl[pl['SCENARIO_ID'].isin(cau) & (pl['PLAN_H'] > now)].sort_values('PLAN_H').groupby('SCENARIO_ID').head(1)
+        cd = pd.DataFrame({'설비 (시나리오)': cau})
+        cd['다음 정기 교체'] = cd['설비 (시나리오)'].map(
+            nxt.set_index('SCENARIO_ID').apply(lambda x: f'{x["PLAN_H"] - now:.0f}시간 뒤 ({PART_NAMES.get(x["PLAN_PART"], x["PLAN_PART"])})', axis=1)
+            if len(nxt) else {}).fillna('계획 없음')
+        cd['할 일'] = np.where(cd['다음 정기 교체'] != '계획 없음', '장비 점검, 정기 교체 때 두 부품 함께 교체 준비',
+                              f'장비 점검, 두 부품 재고 확인 (조달 {cfg.prep_h:.0f}시간 가정. 경보가 켜지면 지금 교체 대상)')
+        st.dataframe(cd, hide_index=True)
+
+    # ⑥ 정책 시뮬레이션 상세
+    if sim:
+        with st.expander('정책 시뮬레이션 상세 (검증 세트, 기본 가정값)'):
+            sv = pd.DataFrame(list(sim.values())).set_index('정책')
+            sv['예상 절감액 (① 대비)'] = sim['regular']['비용'] - sv['비용']
+            st.dataframe(sv[['비용', '예상 절감액 (① 대비)', '고장', '고장 손실', '정비 횟수', '지금 교체', '정기 교체 때',
+                             '기다리다 고장', '고장 전 조치 완료율', '계획 밖 정지(h)', '미확정 경보']],
+                         column_config={'비용': st.column_config.NumberColumn('기대 총비용 (점)', format='%.0f'),
+                                        '고장 전 조치 완료율': st.column_config.NumberColumn(format='%.2f')})
+            st.caption('같은 데이터·같은 모델 예측으로 세 정책을 돌려 실제 고장 시각으로 채점했습니다. '
+                       '준비 시간·안전 기준을 바꾼 민감도는 analysis/10_dss_policy.py에 있습니다.')
+
+
+# 4. 모델 정보
 
 elif page == '모델 정보':
     v = bundle['validation']
@@ -366,7 +612,7 @@ elif page == '모델 정보':
                '자세한 근거는 reports/연주_조기경보_결과보고서.md 4절과 부록 B')
 
 
-# 4. 비용 계산기
+# 5. 비용 계산기
 
 else:
     v = bundle['validation']['event']

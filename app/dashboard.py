@@ -868,9 +868,7 @@ else:
                      else ':green-badge[:material/inventory_2: 부품 준비됨]')] if x))
                 st.markdown(f'기대 총비용 **{fmt_cost(fb_["기대 총비용"], costs)}** · 완료 전 고장 확률 **{fb_["고장 확률"]:.2f}** '
                             f'(안전 기준 {cfg.safety_max:.2f}) · {r["다음 정기 교체"]} · 예비 재고 {stock_text(W["stock"][fsid])}')
-                st.button('이 설비 판단하기', icon=':material/arrow_downward:', key='cta_open',
-                          on_click=pick_equipment, args=(fsid,))
-                st.caption('누르면 아래 ①에 이 설비의 비용 비교가 열리고, 그 바로 아래에서 배정합니다.')
+                st.caption('아래 ① 목록에서 이 설비를 누르면 비용 비교와 배정이 열립니다.')
             else:
                 st.markdown('##### :material/check_circle: 지금 배정할 경보가 없습니다')
                 st.caption(f'열린 작업 {len(busy)}건 · 팀별 ' + ', '.join(f'{k} {v}건' for k, v in load.items()))

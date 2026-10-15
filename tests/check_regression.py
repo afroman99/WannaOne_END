@@ -259,6 +259,11 @@ with _tf.TemporaryDirectory() as d:
     check('승인은 그 뒤 정비가 시작되면 끝난다', 'S0248' in _log2.decision_state('validation', 20)
           and 'S0248' not in _log2.decision_state('validation', 30, {'S0248': 24.0})
           and 'S0248' not in _log2.decision_state('validation', 15))
+_job = _ac.ActionLog(None)
+for _k, _r in [('승인 요청', '현장 작업'), ('승인', '정비 책임자'), ('작업 시작', '현장 작업')]:
+    _job.record(_k, 'test', 'S0294', 72, _r)
+check('진행 단계: 승인 요청 → 승인 → 작업 시작이 차례로 바뀌고, 승인은 그대로 남는다',
+      _job.job_state('test', 72) == {'S0294': '작업 시작'} and _job.decision_state('test', 72)['S0294']['종류'] == '승인')
 _mem = _ac.ActionLog(None)
 for _i in range(10):
     _mem.record('점검 결과', 'test', f'S{300 + _i:04d}', 10, '현장 작업', judged='valve', confirmed='valve' if _i < 7 else 'oscillator')

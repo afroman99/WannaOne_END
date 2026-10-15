@@ -7,7 +7,9 @@
     log.inspection_accuracy()                                # 점검으로 원인 부품을 맞힌 비율 (되먹임)
 
 설계: reports/연주_DSS_설계초안.md 6절 ③ 액션
+  승인 요청       현장 작업     정비 결정을 정비 책임자에게 올린다
   승인 / 보류     정비 책임자   정비 결정 → 정비 작업으로 (보류면 다시 판단)
+  작업 시작·완료  현장 작업     승인된 정비 작업의 진행 (완료하면 점검 결과 입력으로)
   부품 발주       정비 책임자   부품 재고·입고 예정 (자재 담당 역할이 없어 정비 책임자 화면에 둔다)
   점검 결과       현장 작업     점검으로 판단한 부품, 교체 뒤 확인된 원인 부품 → 고장 원인 부품
 
@@ -27,7 +29,8 @@ from pathlib import Path
 
 import pandas as pd
 
-KINDS = ['승인', '보류', '부품 발주', '점검 결과']
+KINDS = ['승인 요청', '승인', '보류', '작업 시작', '작업 완료', '부품 발주', '점검 결과']
+JOB_KINDS = ['승인 요청', '승인', '보류', '작업 시작', '작업 완료']     # 정비 결정 하나의 진행 단계
 ROLES = ['정비 책임자', '현장 작업']
 SPLITS = ['test', 'validation']
 PARTS = ['valve', 'oscillator']
@@ -110,10 +113,10 @@ class ActionLog:
             df = df[df['시각(h)'] <= now]         # 재생: 지금 시각 이후에 한 일은 아직 없다
         return df.reset_index(drop=True)
 
-    def decision_state(self, split, now, last_mnt_start=None):
-        """설비마다 지금 유효한 승인·보류 {sid: row}. 정비가 시작되면 그 전의 승인·보류는 끝난 것으로 본다"""
+    def decision_state(self, split, now, last_mnt_start=None, kinds=('승인', '보류')):
+        """설비마다 지금 유효한 마지막 기록 {sid: row} (기본: 승인·보류). 정비가 시작되면 그 전의 기록은 끝난 것으로 본다"""
         df = self.frame(split, now)
-        df = df[df['종류'].isin(['승인', '보류'])]
+        df = df[df['종류'].isin(list(kinds))]
         out = {}
         for _, r in df.iterrows():
             start = (last_mnt_start or {}).get(r['설비'])
@@ -121,6 +124,10 @@ class ActionLog:
                 continue
             out[r['설비']] = r.to_dict()              # 뒤의 기록이 앞의 기록을 덮는다
         return out
+
+    def job_state(self, split, now, last_mnt_start=None):
+        """설비마다 정비 결정의 진행 단계 {sid: '승인 요청'|'승인'|'보류'|'작업 시작'|'작업 완료'}"""
+        return {k: v['종류'] for k, v in self.decision_state(split, now, last_mnt_start, JOB_KINDS).items()}
 
     def orders(self, split, now, last_mnt_start=None):
         """설비마다 지금 유효한 발주 부품 {sid: set(part)}"""

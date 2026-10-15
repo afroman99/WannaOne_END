@@ -60,6 +60,11 @@ cc:Approval a owl:Class ; rdfs:subClassOf cc:Action ; rdfs:label "승인"@ko ;
     rdfs:comment "정비 책임자가 정비 결정을 승인 → 정비 작업으로"@ko .
 cc:Hold a owl:Class ; rdfs:subClassOf cc:Action ; rdfs:label "보류"@ko ;
     rdfs:comment "정비 책임자가 정비 결정을 보류 → 다시 판단"@ko .
+cc:ApprovalRequest a owl:Class ; rdfs:subClassOf cc:Action ; rdfs:label "승인 요청"@ko ;
+    rdfs:comment "현장이 정비 결정을 정비 책임자에게 올림"@ko .
+cc:WorkStart a owl:Class ; rdfs:subClassOf cc:Action ; rdfs:label "작업 시작"@ko .
+cc:WorkDone a owl:Class ; rdfs:subClassOf cc:Action ; rdfs:label "작업 완료"@ko ;
+    rdfs:comment "완료하면 점검 결과 입력으로 이어진다"@ko .
 cc:PartOrder a owl:Class ; rdfs:subClassOf cc:Action ; rdfs:label "부품 발주"@ko .
 cc:InspectionResult a owl:Class ; rdfs:subClassOf cc:Action ; rdfs:label "점검 결과"@ko ;
     rdfs:comment "현장이 점검으로 판단한 부품과 교체 뒤 확인된 원인 부품. 쌓이면 '점검으로 부품을 맞힐 확률'이 된다"@ko .

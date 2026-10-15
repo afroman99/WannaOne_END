@@ -191,7 +191,8 @@ def build(now, status, signals, works, plans, decisions=(), cost_unit=None, safe
                 g.add((dc, CC.recommends, op))
 
     # 액션 (사람이 한 일). 승인·보류는 지금 결정이 있을 때 그 결정과 선택지에 잇는다
-    kinds = {'승인': CC.Approval, '보류': CC.Hold, '부품 발주': CC.PartOrder, '점검 결과': CC.InspectionResult}
+    kinds = {'승인 요청': CC.ApprovalRequest, '승인': CC.Approval, '보류': CC.Hold, '작업 시작': CC.WorkStart, '작업 완료': CC.WorkDone,
+             '부품 발주': CC.PartOrder, '점검 결과': CC.InspectionResult}
     if actions is not None:
         for i, a in actions.reset_index(drop=True).iterrows():
             s = _sid(a['설비'])
@@ -205,7 +206,7 @@ def build(now, status, signals, works, plans, decisions=(), cost_unit=None, safe
             if a.get('메모'):
                 g.add((ac, CC.note, Literal(str(a['메모']))))
             dc = CC[f'decision_{s}']
-            if a['종류'] in ('승인', '보류') and (dc, RDF.type, CC.MaintenanceDecision) in g:
+            if a['종류'] in ('승인 요청', '승인', '보류', '작업 시작', '작업 완료') and (dc, RDF.type, CC.MaintenanceDecision) in g:
                 g.add((ac, CC.actsOn, dc))
                 if a['종류'] == '승인':
                     for op in g.objects(dc, CC.considers):

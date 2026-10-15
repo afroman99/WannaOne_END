@@ -110,20 +110,26 @@ ICONS = {'현장 작업': ':material/engineering:', '정비 책임자': ':materi
          '의사결정': ':material/balance:', '비용 계산기': ':material/calculate:', '모델 정보': ':material/model_training:'}
 with_icon = lambda x: f'{ICONS.get(x, "")} {x}'
 
-st.markdown('### :material/precision_manufacturing: 연주 설비 조기경보')
+st.session_state.setdefault('role', '현장 작업')     # 기본값은 세션 상태로만 정한다 (표에서 설비를 누르면 화면을 바꾸기 때문)
+st.session_state.setdefault('split_label', list(SPLITS)[0])
+st.session_state.setdefault('now', 72)
 with st.container(horizontal=True, vertical_alignment='bottom', gap='medium'):
-    st.session_state.setdefault('role', '현장 작업')     # 기본값은 세션 상태로만 정한다 (표에서 설비를 누르면 화면을 바꾸기 때문)
+    st.markdown('#### :material/precision_manufacturing: 연주 설비 조기경보')
+    st.space('stretch')
+    # 시연 설정: 실제 운영에는 없는 재생용 값이라 한 곳에 접어 둔다 (지금 값은 버튼 이름에 보인다)
+    with st.popover(f'{st.session_state["split_label"].split(" ")[0]} · {st.session_state["now"]}시간',
+                    icon=':material/tune:', help='시연 설정: 데이터 세트와 지금 시각'):
+        split_label = st.selectbox('데이터 세트', list(SPLITS), key='split_label',
+                                   help='테스트: 정답이 없는 실제 운영과 같은 상황 · 검증: 정답이 있어 실제 고장과 비교할 수 있음')
+        split = SPLITS[split_label]
+        now = st.slider('지금 시각 (시나리오 시작 후 h)', 0, 72, step=1, key='now',
+                        help='이 시각까지의 데이터만으로 본 상태를 보여 줍니다. 왼쪽으로 옮기면 과거로 돌아가 재생할 수 있습니다.')
+        show_truth = st.toggle('정답 보기 (검증 세트)', key='truth', disabled=split != 'validation',
+                               help='앞으로 일어날 실제 고장 시각(정답)을 겹쳐 봅니다. 모델은 이 정보를 보지 않습니다.') and split == 'validation'
+with st.container(horizontal=True, vertical_alignment='bottom', gap='medium'):
     role = st.segmented_control('보는 사람', list(ROLE_PAGES), key='role', required=True, format_func=with_icon)
     st.session_state.setdefault(f'page_{role}', ROLE_PAGES[role][0])
     page = st.segmented_control('화면', ROLE_PAGES[role], key=f'page_{role}', required=True, format_func=with_icon)
-c1, c2, c3 = st.columns([1.6, 2.6, 1.2], vertical_alignment='center')
-split_label = c1.selectbox('데이터 세트', list(SPLITS), key='split_label',
-                       help='테스트: 정답이 없는 실제 운영과 같은 상황 · 검증: 정답이 있어 실제 고장과 비교할 수 있음')
-split = SPLITS[split_label]
-now = c2.slider('지금 시각 (시나리오 시작 후 h)', 0, 72, 72, step=1, key='now',
-                help='이 시각까지의 데이터만으로 본 상태를 보여 줍니다. 왼쪽으로 옮기면 과거로 돌아가 재생할 수 있습니다.')
-show_truth = c3.toggle('정답 보기', key='truth', disabled=split != 'validation',
-                       help='검증 세트에서만 켤 수 있습니다. 앞으로 일어날 실제 고장 시각(정답)을 겹쳐 봅니다. 모델은 이 정보를 보지 않습니다.') and split == 'validation'
 
 pts, hr, contrib, contrib_unit, mnt = get_data(split)
 
@@ -328,9 +334,9 @@ def work_plan(A, t):
                      '_start': (e['wait_h'] if b['선택지'].startswith('다음 정기') else b['정비 완료까지(h)'] - costs.replace_h)})
     dec = pd.DataFrame(rows)
     if len(dec):
-        state = LOG.decision_state(split, now, MNT_START)
+        state = LOG.job_state(split, now, MNT_START)
         dec.insert(3, '방법', '점검 후 한 부품' if feedback()['ready'] else '두 부품')
-        dec.insert(1, '조치', dec['설비 (시나리오)'].map(lambda x: state[x]['종류'] if x in state else '대기'))
+        dec.insert(1, '조치', dec['설비 (시나리오)'].map(lambda x: state.get(x, '대기')))
     return {'dec': dec, 'need_crew': need_crew, 'per_day': per_day, 'evaluate_options': evaluate_options,
             'cfg': cfg, 'costs': costs, 'curve': curve, 'pl': pl}
 
@@ -368,6 +374,49 @@ def open_detail(table_key, ids):
         st.session_state[f'page_{st.session_state["role"]}'] = '설비 상세'
 
 
+
+def go_detail(sid):
+    """버튼에서 '설비 상세' 화면으로 (콜백)"""
+    st.session_state['sid'] = sid
+    st.session_state[f'page_{st.session_state["role"]}'] = '설비 상세'
+
+
+def act(kind, sid, role_, note_key=None, **kw):
+    """조치 기록 버튼 콜백: 기록하고 알림 (note_key: 메모 입력칸의 key)"""
+    LOG.record(kind, split, sid, now, role_, note=st.session_state.get(note_key, '') if note_key else '', **kw)
+    st.toast(f'{sid}: {kind}', icon=':material/check_circle:')
+
+
+RISK_BADGE = {'높음': ':red-badge[:material/warning: 끝나기 전 고장 위험 높음]', '보통': ':orange-badge[끝나기 전 고장 위험 보통]',
+              '낮음': ':green-badge[끝나기 전 고장 위험 낮음]', '—': ''}
+STATE_BADGE = {'대기': ':gray-badge[승인 전]', '승인 요청': ':blue-badge[:material/schedule: 승인 기다리는 중]',
+               '승인': ':green-badge[:material/check: 승인됨]', '보류': ':orange-badge[:material/pause: 보류]',
+               '작업 시작': ':blue-badge[:material/build: 작업 중]', '작업 완료': ':green-badge[:material/task_alt: 작업 완료]'}
+
+
+def inspected_after_done(sid):
+    """작업 완료 뒤 점검 결과를 넣었는가"""
+    lg = LOG.frame(split, now)
+    lg = lg[lg['설비'] == sid]
+    done = lg.index[lg['종류'] == '작업 완료']
+    return len(done) > 0 and (lg.loc[done[-1]:, '종류'] == '점검 결과').any()
+
+
+def inspection_form(sid, role_, key):
+    """점검 결과 입력 (작업 완료 뒤 카드와 설비 상세에서 같이 쓴다)"""
+    with st.form(key, clear_on_submit=True, border=False):
+        i1, i2 = st.columns(2)
+        judged = i1.segmented_control('점검으로 판단한 부품', actions.JUDGED, required=True, default='구분 못함',
+                                      format_func=lambda x: PART_NAMES.get(x, x), key=f'{key}_j')
+        conf = i2.segmented_control('교체 뒤 확인된 원인 부품', actions.CONFIRMED, required=True, default='아직 모름',
+                                    format_func=lambda x: PART_NAMES.get(x, x), key=f'{key}_c')
+        note = st.text_input('메모 (선택)', max_chars=actions.MAX_NOTE, placeholder='예: 진동장치 베어링 소음', key=f'{key}_n')
+        if st.form_submit_button('점검 결과 기록', icon=':material/save:', type='primary'):
+            LOG.record('점검 결과', split, sid, now, role_, judged=judged, confirmed=conf, note=note)
+            st.toast(f'{sid}: 점검 결과 기록', icon=':material/save:')
+            st.rerun()
+
+
 STAGE_STYLE = {WARN: 'background-color: rgba(214,69,69,.18)', CAU: 'background-color: rgba(224,165,38,.22)',
                '정비 중': 'background-color: rgba(158,158,158,.18)', '정비 후 예측 대기': 'background-color: rgba(158,158,158,.18)'}
 
@@ -379,8 +428,6 @@ def style_stage(df, col):
 # 0. 현장 작업: 오늘 할 일
 
 if page == '오늘 할 일':
-    st.header('오늘 할 일', icon=ICONS['오늘 할 일'])
-    st.caption(f'{split_label} · 지금 {now}시간 기준')
     if not bundle.get('dss'):
         st.warning('이 모델 파일에는 정비 계획 정보가 없습니다. python analysis/05_predict_test.py 로 다시 만드세요.')
         st.stop()
@@ -388,68 +435,104 @@ if page == '오늘 할 일':
     t = status_table()
     W = work_plan(A, t)
     dec, cfg, costs = W['dec'], W['cfg'], W['costs']
+    jobs_state = LOG.job_state(split, now, MNT_START)
+    order = dec.sort_values(['순위'], na_position='last') if len(dec) else dec
+    cau = t.index[t['상태'] == CAU].tolist()
 
-    # 안전 경고가 맨 위
-    urgent = dec[dec['제약'].str.startswith('즉시')]['설비 (시나리오)'].tolist() if len(dec) else []
+    # 지금 할 일 하나 (CTA): 작업 중 → 완료 뒤 점검 결과 → 승인됨 → 승인 전 순서
+    #   즉시 조치 설비는 승인을 요청한 뒤에도 카드에 남는다 (승인 없이 시작할 수 있게)
+    def pick():
+        steps = [('작업 시작', False), ('작업 완료', False), ('승인', False), ('대기', True), ('승인 요청', True),
+                 ('대기', False), ('승인 요청', False)]
+        for want, only_urgent in steps:
+            for _, r in order.iterrows():
+                stt = jobs_state.get(r['설비 (시나리오)'], '대기')
+                if stt != want or (only_urgent and not r['제약'].startswith('즉시')):
+                    continue
+                if want == '작업 완료' and inspected_after_done(r['설비 (시나리오)']):
+                    continue
+                return r, stt
+        return None, None
+    focus, fstate = pick() if len(order) else (None, None)
+
+    st.header('오늘 할 일', icon=ICONS['오늘 할 일'])
+    with st.container(border=True):
+        if focus is None:
+            st.markdown('##### :material/check_circle: 지금 할 교체 작업이 없습니다')
+            st.caption('점검할 설비(주의)가 있으면 아래 목록을 확인하세요.' if cau else '모든 설비가 정상입니다.')
+        else:
+            sid = focus['설비 (시나리오)']
+            e = focus['_e']
+            plan = focus['추천'].startswith('다음 정기')
+            one = focus['방법'] == '점검 후 한 부품'
+            todo = ('정기 교체 때 ' if plan else '설비 정지 · ') + ('점검 후 원인 부품만 교체' if one else '두 부품(밸브·진동장치) 교체')
+            start_h = now + focus['_start']
+            p_fail = focus['완료 전 고장 확률']
+            urgent = focus['제약'].startswith('즉시')
+            st.caption('지금 할 일' + (f' · 작업 순서 {int(focus["순위"])}번' if pd.notna(focus['순위']) else ''))
+            st.markdown(f'### {sid} — {todo}')
+            st.markdown(' '.join(x for x in [':red-badge[:material/emergency: 즉시 조치]' if urgent else '',
+                                               STATE_BADGE.get(fstate, ''), RISK_BADGE.get(risk_word(p_fail, cfg.safety_max), '')] if x))
+            st.markdown(f'**{start_h:.0f}시간 → {start_h + costs.replace_h:.0f}시간** · '
+                        + (f'{e["wait_h"]:.0f}시간 뒤 정기 교체({e["part"]})에 맞춰 함께 합니다' if plan else
+                           '경보가 켜진 지 오래돼 지금 바로 해야 합니다' if urgent else '24시간 안 고장 위험이 있어 지금 교체합니다'))
+            with st.container(horizontal=True):
+                if fstate == '작업 시작':
+                    st.button('작업 완료', icon=':material/task_alt:', type='primary', on_click=act, args=('작업 완료', sid, role))
+                elif fstate == '작업 완료':
+                    st.markdown('**교체가 끝났습니다. 점검 결과를 남겨 주세요** (원인 부품을 가려내는 기록이 됩니다)')
+                elif fstate == '승인':
+                    st.button('작업 시작', icon=':material/play_arrow:', type='primary', on_click=act, args=('작업 시작', sid, role))
+                elif fstate == '승인 요청':
+                    st.button('승인 기다리는 중', icon=':material/schedule:', disabled=True)
+                    st.button('승인 없이 시작 (긴급)', icon=':material/play_arrow:', type='primary' if urgent else 'secondary',
+                              on_click=act, args=('작업 시작', sid, role), help='안전 기준을 넘는 즉시 조치 설비는 승인을 기다리지 않습니다')
+                else:
+                    st.button('승인 요청', icon=':material/send:', type='primary', on_click=act, args=('승인 요청', sid, role))
+                    if urgent:
+                        st.button('승인 없이 시작 (긴급)', icon=':material/play_arrow:', on_click=act, args=('작업 시작', sid, role))
+                st.button('설비 보기', icon=':material/monitoring:', on_click=go_detail, args=(sid,))
+            if fstate == '작업 완료':
+                inspection_form(sid, role, f'card_inspect_{sid}')
+
+    # 다른 알림: 한 줄씩
     short = dec[dec['제약'].str.startswith('안전 기준 초과')]['설비 (시나리오)'].tolist() if len(dec) else []
     last_p = after_last_maintenance(pts_now, 'T_H').sort_values('T_H').groupby('SCENARIO_ID').tail(1)
-    sensor = last_p.loc[last_p.get('OOR_N', pd.Series(0, index=last_p.index)) > 0, 'SCENARIO_ID'].tolist() if 'OOR_N' in last_p else []
-    if urgent:
-        st.error(', '.join(urgent) + ' — 경보가 켜진 지 오래됐습니다. 가장 먼저 교체하세요.', title='즉시 조치', icon=':material/emergency:')
+    sensor = last_p.loc[last_p['OOR_N'] > 0, 'SCENARIO_ID'].tolist() if 'OOR_N' in last_p else []
+    notes = []
     if short:
-        st.warning(', '.join(short) + ' — 차례를 기다리면 고장 위험이 높아집니다. 정비 책임자에게 팀·공수 추가를 요청하세요.',
-                   title='일손 부족', icon=':material/group_add:')
+        notes.append(f':orange-badge[:material/group_add: 일손 부족 {len(short)}대] 차례를 기다리면 위험이 커집니다: {", ".join(short)} → 정비 책임자에게 팀·공수 추가 요청')
     if sensor:
-        st.warning(', '.join(sensor) + ' — 입력 값이 평소 범위를 벗어났습니다. 센서와 설비를 직접 확인하세요.',
-                   title='센서 확인', icon=':material/sensors:')
+        notes.append(f':orange-badge[:material/sensors: 센서 확인 {len(sensor)}대] 입력 값이 평소 범위 밖: {", ".join(sensor)}')
+    if notes:
+        st.markdown('  \n'.join(notes))
 
-    now_jobs = dec[~dec['추천'].str.startswith('다음 정기')] if len(dec) else dec
-    plan_jobs = dec[dec['추천'].str.startswith('다음 정기')] if len(dec) else dec
-    cau = t.index[t['상태'] == CAU].tolist()
-    k1, k2, k3, k4 = st.columns(4, border=True)
-    k1.metric('교체할 설비', len(now_jobs))
-    k2.metric('정기 교체 때 함께', len(plan_jobs))
-    k3.metric('점검할 설비 (주의)', len(cau))
-    k4.metric('정비 중', int((t['상태'] == '정비 중').sum()))
-
-    st.subheader('작업 순서', icon=':material/format_list_numbered:')
-    if dec.empty:
-        st.success('지금 교체할 설비가 없습니다.', icon=':material/check_circle:')
+    st.subheader(f'작업 순서 · {len(order)}건', icon=':material/format_list_numbered:')
+    if order.empty:
+        st.caption('경보가 켜진 설비가 없습니다.')
     else:
         jobs = []
-        for _, r in dec.sort_values(['순위'], na_position='last').iterrows():
+        for _, r in order.iterrows():
             e = r['_e']
             plan = r['추천'].startswith('다음 정기')
-            p_fail = r['완료 전 고장 확률']
-            if plan:
-                why = f'{e["wait_h"]:.0f}시간 뒤 정기 교체({e["part"]})가 있고, 그때까지 고장 위험 {risk_word(p_fail, cfg.safety_max)}'
-            elif r['제약'].startswith('즉시'):
-                why = '경보가 켜진 지 오래됨 · 지금 바로'
-            else:
-                why = (f'24시간 안 고장 위험 · 다음 정기 교체 {"없음" if pd.isna(e["wait_h"]) else f"{e["wait_h"]:.0f}시간 뒤라 기다릴 수 없음"}')
             one = r['방법'] == '점검 후 한 부품'
             jobs.append({'순서': '정기 교체 때' if plan else f'{int(r["순위"])}',
                          '설비': r['설비 (시나리오)'],
-                         '승인': {'승인': '승인됨', '보류': '보류'}.get(r['조치'], '승인 대기'),
+                         '진행': {'대기': '승인 전'}.get(jobs_state.get(r['설비 (시나리오)'], '대기'), jobs_state.get(r['설비 (시나리오)'])),
                          '할 일': ('정기 교체 때 ' if plan else '설비 정지 · ')
-                                 + ('점검으로 원인 부품을 가려 그 부품만 교체' if one else
-                                    ('두 부품 함께 교체' if plan else '두 부품(밸브·진동장치) 교체')),
+                                 + ('점검 후 원인 부품만 교체' if one else ('두 부품 함께 교체' if plan else '두 부품 교체')),
                          '시작 (h)': now + r['_start'], '끝 (h)': now + r['_start'] + costs.replace_h,
-                         '끝나기 전 고장 위험': risk_word(p_fail, cfg.safety_max), '이유': why})
+                         '끝나기 전 고장 위험': risk_word(r['완료 전 고장 확률'], cfg.safety_max)})
         jt = pd.DataFrame(jobs)
-        st.dataframe(jt.style.map(lambda v: {'높음': 'color: #d64545; font-weight: 600'}.get(v, ''), subset=['끝나기 전 고장 위험']),
+        st.dataframe(jt.style.map(lambda v: {'높음': 'color: #c23b3b; font-weight: 600'}.get(v, ''), subset=['끝나기 전 고장 위험']),
                      hide_index=True, key='tbl_jobs', on_select=lambda: open_detail('tbl_jobs', jt['설비'].tolist()),
                      selection_mode='single-row',
                      column_config={'시작 (h)': st.column_config.NumberColumn(format='%d시간', help='시나리오 시작 후 시각'),
-                                    '끝 (h)': st.column_config.NumberColumn(format='%d시간'),
-                                    '이유': st.column_config.TextColumn(width='large')})
-        st.caption(f'정비팀 {A["n_crews"]}팀 · 팀당 하루 {A["crew_day_h"]}공수(교체 {W["per_day"]}번)로 순서를 정했습니다. '
-                   '줄을 누르면 그 설비의 신호 흐름을 볼 수 있습니다. 순서와 기준은 정비 책임자가 정하고, '
-                   '승인된 작업부터 진행합니다. 점검·교체 뒤에는 설비 상세 화면에서 점검 결과를 입력해 주세요.')
+                                    '끝 (h)': st.column_config.NumberColumn(format='%d시간')})
+        st.caption(f'정비팀 {A["n_crews"]}팀 · 팀당 하루 {A["crew_day_h"]}공수(교체 {W["per_day"]}번) 기준 순서입니다. 줄을 누르면 설비 상세가 열립니다.')
 
     if cau:
-        st.subheader('점검할 설비', icon=':material/search_check:')
-        st.caption('주의: 열화가 시작됐지만 아직 24시간 안 고장 위험은 낮습니다')
+        st.subheader(f'점검할 설비 (주의) · {len(cau)}대', icon=':material/search_check:')
         pl = W['pl']
         nxt = pl[pl['SCENARIO_ID'].isin(cau) & (pl['PLAN_H'] > now)].sort_values('PLAN_H').groupby('SCENARIO_ID').head(1).set_index('SCENARIO_ID')
         ct = pd.DataFrame({'설비': cau})
@@ -459,12 +542,12 @@ if page == '오늘 할 일':
                               '장비 점검 · 두 부품 재고 확인 (경보가 켜지면 교체)')
         st.dataframe(ct, hide_index=True, key='tbl_check', on_select=lambda: open_detail('tbl_check', ct['설비'].tolist()),
                      selection_mode='single-row')
+        st.caption('열화가 시작됐지만 아직 24시간 안 고장 위험은 낮습니다.')
     with st.expander('이 화면 보는 법', icon=':material/help:'):
-        st.markdown('- **작업 순서**: 고장 위험이 큰 설비부터 정비팀에 배정했습니다. 정기 교체가 곧 있는 설비는 그때 함께 교체합니다.\n'
+        st.markdown('- **지금 할 일**: 가장 먼저 할 작업 하나와 눌러야 할 버튼입니다. 순서: 승인 요청 → (정비 책임자 승인) → 작업 시작 → 작업 완료 → 점검 결과.\n'
+                    '- **즉시 조치** 설비는 승인을 기다리지 않고 시작할 수 있습니다(안전이 먼저).\n'
                     '- **끝나기 전 고장 위험**: 교체가 끝나기 전에 고장 날 가능성입니다(낮음 · 보통 · 높음).\n'
-                    '- **승인**: 정비 책임자가 의사결정 화면에서 승인·보류한 상태입니다.\n'
-                    '- **점검할 설비**: 열화가 시작됐지만 아직 24시간 안 고장 위험은 낮습니다. 상태를 확인하고 부품을 준비합니다.\n'
-                    '- 이 화면은 지나간 데이터를 재생합니다. 실제로는 조치하지 않은 경보가 쌓여 보일 수 있습니다.')
+                    '- 이 화면은 지나간 데이터를 재생합니다(위 오른쪽 시연 설정). 작업 완료를 눌러도 데이터의 경보는 그대로 남습니다.')
 
 # 1. 전체 현황
 
@@ -473,6 +556,20 @@ elif page == '전체 현황':
     st.caption(f'{split_label} · 지금 {now}시간 기준')
     t = status_table()
     n_alarm, n_caution = int((t['상태'] == WARN).sum()), int((t['상태'] == CAU).sum())
+    if bundle.get('dss'):
+        js = LOG.job_state(split, now, MNT_START)
+        alarm_ids = t.index[t['상태'] == WARN]
+        pending = [x for x in alarm_ids if js.get(x, '대기') in ('대기', '승인 요청')]
+        with st.container(border=True, horizontal=True, vertical_alignment='center'):
+            if pending:
+                n_req = sum(js.get(x) == '승인 요청' for x in pending)
+                st.markdown(f'**결정할 일 {len(pending)}건**' + (f' · 현장 승인 요청 {n_req}건' if n_req else '')
+                            + ' — 경보 설비의 정비 시점과 방법을 승인하세요')
+                st.space('stretch')
+                st.button('의사결정 열기', icon=':material/arrow_forward:', type='primary',
+                          on_click=lambda: st.session_state.update({'page_정비 책임자': '의사결정'}))
+            else:
+                st.markdown(':material/check_circle: 지금 결정할 일이 없습니다')
     c1, c2, c3, c4 = st.columns(4, border=True)
     c1.metric('설비 수', len(t))
     c2.metric('지금 경보', n_alarm, help='WARNING: 24시간 안 고장 위험')
@@ -654,17 +751,7 @@ elif page == '설비 상세':
                    '"신호 → 부품" 링크는 두지 않았습니다.')
 
     with st.expander('점검 결과 입력', icon=':material/edit_note:', expanded=(role == '현장 작업' and row['상태'] in (WARN, CAU, '정비 중'))):
-        with st.form(f'inspect_{sid}', clear_on_submit=True, border=False):
-            i1, i2 = st.columns(2)
-            judged = i1.segmented_control('점검으로 판단한 부품', actions.JUDGED, required=True, default='구분 못함',
-                                          format_func=lambda x: PART_NAMES.get(x, x), key=f'judged_{sid}')
-            conf = i2.segmented_control('교체 뒤 확인된 원인 부품', actions.CONFIRMED, required=True, default='아직 모름',
-                                        format_func=lambda x: PART_NAMES.get(x, x), key=f'conf_{sid}')
-            note = st.text_input('메모 (선택)', max_chars=actions.MAX_NOTE, placeholder='예: 진동장치 베어링 소음')
-            if st.form_submit_button('기록', icon=':material/save:'):
-                LOG.record('점검 결과', split, sid, now, role, judged=judged, confirmed=conf, note=note)
-                st.toast(f'{sid}: 점검 결과 기록', icon=':material/save:')
-                st.rerun()
+        inspection_form(sid, role, f'inspect_{sid}')
         st.caption('점검으로 판단한 부품과 교체 뒤 실제로 확인된 원인이 쌓이면, 점검으로 부품을 맞히는 비율을 잽니다. '
                    '이 비율이 손익분기를 넘으면 "두 부품 교체" 대신 "점검 후 한 부품"을 추천합니다(의사결정 화면의 조치 기록).')
 
@@ -678,12 +765,6 @@ elif page == '의사결정':
     if not D:
         st.warning('이 모델 파일에는 의사결정 정보가 없습니다. 터미널에서 `python analysis/05_predict_test.py`로 다시 만드세요.')
         st.stop()
-    with st.expander('이 화면 보는 법', icon=':material/help:'):
-        st.markdown('- 경보 설비마다 정비 선택지(지금 / N시간 뒤 / 다음 정기 교체 때)의 **기대 총비용 = 정비 비용 + 생산 차질 비용 + '
-                    '고장 확률 × 고장 시 손실**을 비교해 추천합니다.\n'
-                    '- 안전 기준과 실행 가능성(정비팀·부품 준비)은 비용보다 먼저 지킵니다.\n'
-                    '- 판단은 검증 가능한 예측값과 계산·규칙으로만 하며, 최종 결정은 정비 책임자가 합니다.')
-
     A = assumptions()
     A['mode'] = st.segmented_control('비용 기준', COST_MODES, default=A['mode'], required=True,
                          help='데이터셋 점수: 과제의 비용 규칙(모든 팀 공통). 현장 가정: 소모품·중요 부품·공임·인력·생산 차질·고장 손실을 만 원으로 넣은 값(정건우 현장 경험)')
@@ -693,31 +774,9 @@ elif page == '의사결정':
     def won(x):
         return f'{x:,.0f}{U}' if not FIELD or abs(x) < 10000 else f'{x / 10000:,.2f}억 원'
 
-    # ① 이 시스템이 없었다면 → 있으면 (검증 세트 시뮬레이션)
-    sim = D.get('validation_field') if FIELD else D.get('validation')
-    if FIELD and not sim:
-        st.info('이 모델 파일에는 현장 가정 시뮬레이션이 없습니다. python analysis/05_predict_test.py 로 다시 만드세요.')
-    if sim:
-        st.subheader('이 시스템이 없었다면 → 있으면', icon=':material/compare_arrows:')
-        st.caption('검증 세트 72대 시뮬레이션')
-        r1, r2, r3 = sim['regular'], sim['now'], sim['dss']
-        k1, k2, k3 = st.columns(3, border=True)
-        k1.metric('① 시스템 없음: 정기 교체만', won(r1['비용']), f'고장 {r1["고장"]}건', delta_color='off')
-        k2.metric('② 경보만: 켜지면 즉시 교체', won(r2['비용']), f'{won(r2["비용"] - r1["비용"])} · 고장 {r2["고장"]}건',
-                  delta_color='inverse')
-        k3.metric('③ 경보 + 의사결정 지원', won(r3['비용']), f'{won(r3["비용"] - r1["비용"])} · 고장 {r3["고장"]}건',
-                  delta_color='inverse')
-        st.caption(f'정비 관리자가 예측 없이 정기 교체만 하면 고장 {r1["고장"]}건이 그대로 일어납니다. 경보를 따라 바로 교체하면 고장이 '
-                   f'{r2["고장"]}건으로 줄지만, 정기 교체 직전의 경보까지 따로 교체해 정비가 {r2["정비 횟수"]}번 듭니다. '
-                   f'의사결정 지원은 그중 {r3["정기 교체 때"]}건을 정기 교체 때 함께 처리해 계획 밖 정지를 '
-                   f'{r2["계획 밖 정지(h)"]:.0f} → {r3["계획 밖 정지(h)"]:.0f}시간으로 줄입니다. '
-                   f'**시뮬레이션에 따른 예상 절감액: {won(r1["비용"] - r3["비용"])} ({(r1["비용"] - r3["비용"]) / r1["비용"]:.0%}, ① 대비)**. '
-                   + ('현장 가정(만 원, 기본 가정값)으로 계산한 값으로 실제 운영 결과가 아닙니다. ' if FIELD else
-                      '점수는 데이터셋 비용 규칙이며 실제 돈이 아닙니다. ')
-                   + '정답을 알 수 없는 관측 끝부분의 경보는 빠져 있습니다(analysis/10_dss_policy.py).')
-
     # ② 가정값 (여기서 바꾸면 현장 작업 화면의 할 일도 같은 계획으로 바뀐다)
     with st.expander('가정값 (바꾸면 추천과 근거, 현장 할 일 목록이 다시 계산됩니다)', expanded=False, icon=':material/tune:'):
+        assume_note = st.container()          # 지금 가정 요약 (아래에서 계산 뒤 채운다)
         st.markdown('**안전·실행 가능성 (비용보다 먼저 지키는 제약)**')
         a1, a2, a3, a4 = st.columns(4)
         A['safety'] = a1.slider('안전 기준: 정비 완료 전 고장 확률 상한', 0.0, 0.5, A['safety'], 0.01)
@@ -760,7 +819,7 @@ elif page == '의사결정':
     st.session_state['assume'] = dict(A)
     costs, cfg = make_cfg(A)
     now_cost = 2 * costs.part + costs.unnecessary + costs.replace_fixed + costs.replace_h * costs.downtime_h
-    st.caption(f'지금 가정: 지금 두 부품 교체 **{won(now_cost)}** · 정기 교체 때 다른 부품 추가 **{won(costs.part)}** · '
+    assume_note.caption(f'지금 가정: 지금 두 부품 교체 **{won(now_cost)}** · 정기 교체 때 다른 부품 추가 **{won(costs.part)}** · '
                f'고장 시 손실 = 복구 {costs.repair:,.0f} + 복구 {costs.repair_h:.0f}시간 × (생산 차질 {costs.downtime_h:,.1f} + 인력 {costs.labor_h:,.1f}) '
                f'+ 고장 추가 손실 {costs.failure_penalty:,.0f} = **{won(costs.failure_loss)}** · 안전 기준 {cfg.safety_max:.2f} · '
                f'부품 준비 {cfg.prep_h:.0f}시간 · 정비팀 {A["n_crews"]}팀(팀당 하루 {A["crew_day_h"]}공수). 고장 확률은 학습 세트에서 경보 뒤 고장까지 걸린 시간 분포로 계산합니다.')
@@ -770,20 +829,51 @@ elif page == '의사결정':
     dec, need_crew, per_day, evaluate_options, cfg, costs, curve, pl = (W[k] for k in ['dec', 'need_crew', 'per_day', 'evaluate_options', 'cfg', 'costs', 'curve', 'pl'])
     n_crews, crew_day_h = A['n_crews'], A['crew_day_h']
 
-    c1, c2, c3, c4 = st.columns(4, border=True)
-    c1.metric('경보 설비', len(dec))
-    c2.metric('지금 정비 (정비팀 배정)', len(need_crew))
-    c3.metric('정기 교체 때 함께', int(dec['추천'].str.startswith('다음 정기').sum()) if len(dec) else 0)
-    c4.metric('일정 제약 충족', f'{int(dec["제약"].str.startswith("충족").sum())}/{len(dec)}' if len(dec) else '—',
-              help='정비팀 차례를 기다려도 정비가 끝나기 전 고장 확률이 안전 기준 이하인 설비 수')
-    if len(dec) and dec['제약'].str.startswith('즉시').any():
-        st.error(', '.join(dec.loc[dec['제약'].str.startswith('즉시'), '설비 (시나리오)'])
-                 + ' — 지금 교체해도 완료 전 고장 확률이 안전 기준을 넘습니다. 가장 먼저 정비하세요.',
-                 title='즉시 조치', icon=':material/emergency:')
-        st.caption('지나간 데이터를 재생하는 화면이라, 실제로는 조치하지 않은 경보가 쌓여 보일 수 있습니다.')
+    # 결정할 일 (CTA): 현장 승인 요청 → 즉시 조치 → 작업 순서
+    jobs_state = LOG.job_state(split, now, MNT_START)
+    if len(dec):
+        q = dec.assign(_st=dec['설비 (시나리오)'].map(lambda x: jobs_state.get(x, '대기')))
+        q = q[q['_st'].isin(['승인 요청', '대기'])]
+        q = q.assign(_k=(q['_st'] != '승인 요청').astype(int), _u=(~q['제약'].str.startswith('즉시')).astype(int)) \
+             .sort_values(['_k', '_u', '순위'], na_position='last')
+    else:
+        q = dec
+    with st.container(border=True):
+        if q.empty:
+            st.markdown('##### :material/check_circle: 지금 결정할 일이 없습니다')
+            st.caption(f'경보 설비 {len(dec)}대: ' + (', '.join(f'{k} {v}대' for k, v in pd.Series(list(jobs_state.values())).value_counts().items())
+                                                  if jobs_state else '조치 기록 없음'))
+        else:
+            r = q.iloc[0]
+            fsid, fe = r['설비 (시나리오)'], r['_e']
+            fb_ = fe['best']
+            urgent = r['제약'].startswith('즉시')
+            n_req = int((q['_st'] == '승인 요청').sum())
+            st.caption(f'결정할 일 {len(q)}건' + (f' · 현장 승인 요청 {n_req}건' if n_req else ''))
+            st.markdown(f'### {fsid} — {fb_["선택지"]}')
+            st.markdown(' '.join(x for x in [
+                ':red-badge[:material/emergency: 즉시 조치: 지금 해도 안전 기준 초과]' if urgent else '',
+                ':blue-badge[:material/send: 현장 승인 요청]' if r['_st'] == '승인 요청' else '',
+                f':gray-badge[작업 순서 {int(r["순위"])}번]' if pd.notna(r['순위']) else ':gray-badge[정기 교체 때]',
+                f':violet-badge[방법: {r["방법"]}]'] if x))
+            st.markdown(f'기대 총비용 **{won(fb_["기대 총비용"])}** · 완료 전 고장 확률 **{fb_["고장 확률"]:.2f}** '
+                        f'(안전 기준 {cfg.safety_max:.2f}) · 완료까지 {fb_["정비 완료까지(h)"]:.0f}시간 · {r["다음 정기 교체"]}')
+            with st.container(horizontal=True, vertical_alignment='bottom'):
+                st.button('승인', icon=':material/check_circle:', type='primary', key='cta_ok', on_click=act,
+                          args=('승인', fsid, '정비 책임자', 'cta_memo'), kwargs={'option': fb_['선택지']})
+                st.button('보류', icon=':material/pause_circle:', key='cta_hold', on_click=act,
+                          args=('보류', fsid, '정비 책임자', 'cta_memo'), kwargs={'option': fb_['선택지']})
+                st.text_input('메모 (선택)', max_chars=actions.MAX_NOTE, key='cta_memo', placeholder='예: 생산 일정 확인 후',
+                              label_visibility='collapsed')
+                ordered_ = LOG.orders(split, now, MNT_START).get(fsid, set())
+                for part in actions.PARTS:
+                    st.button(f'{PART_NAMES[part]} 발주' + (' (완료)' if part in ordered_ else ''), icon=':material/local_shipping:',
+                              key=f'cta_order_{part}', disabled=part in ordered_, on_click=act,
+                              args=('부품 발주', fsid, '정비 책임자', 'cta_memo'), kwargs={'part': part})
+            st.caption('승인하면 현장 "오늘 할 일"에서 작업 시작 버튼이 켜집니다. 근거는 아래 "설비별 근거"에서 볼 수 있습니다. '
+                       + ('클라우드에서는 기록이 이 브라우저 세션에만 남습니다.' if CLOUD else '기록: actions/action_log.csv'))
 
-    st.subheader('정비 결정 목록', icon=':material/event_note:')
-    st.caption('우선순위와 정비팀 일정')
+    st.subheader(f'전체 정비 결정 · {len(dec)}건', icon=':material/event_note:')
     if dec.empty:
         st.success('지금 경보가 켜진 설비가 없습니다.', icon=':material/check_circle:')
     else:
@@ -798,6 +888,7 @@ elif page == '의사결정':
                    f'하루에 {n_crews * per_day}대를 넘는 설비는 다음 날로 넘어갑니다. 차례를 기다리는 설비는 그만큼 늦게 끝나는 것으로 다시 계산합니다.')
 
         # ④ 설비별 근거: 선택지 비교와 산정 근거
+        st.subheader('설비별 근거', icon=':material/rule:')
         sid = st.selectbox('설비를 골라 근거 보기', dec['설비 (시나리오)'].tolist())
         e = dec.set_index('설비 (시나리오)').loc[sid, '_e']
         slot = dec.set_index('설비 (시나리오)').loc[sid, '_slot']
@@ -817,7 +908,7 @@ elif page == '의사결정':
             f' + {b["고장 확률"]:.2f} × 고장 시 손실 {b["고장 시 손실"]:,.0f} ({U})')
         with st.container(border=True):
             cur = LOG.decision_state(split, now, MNT_START).get(sid)
-            st.markdown(f'**조치** · 지금 상태: ' + (f'{cur["종류"]} ({cur["시각(h)"]:.0f}h, {cur["선택지"] or "-"})' if cur else '대기'))
+            st.markdown(f'**이 설비 조치** · 지금 상태: ' + STATE_BADGE.get(jobs_state.get(sid, '대기'), '대기'))
             with st.container(horizontal=True, vertical_alignment='bottom'):
                 memo = st.text_input('메모 (선택)', max_chars=actions.MAX_NOTE, key=f'memo_{sid}', placeholder='예: 생산 일정 확인 후 결정')
                 if st.button('승인', icon=':material/check_circle:', type='primary', key=f'ok_{sid}'):
@@ -881,6 +972,29 @@ elif page == '의사결정':
             st.altair_chart(alt.layer(*marks).properties(height=240), width='stretch')
             st.caption('파란 선: 지금부터 h시간 안에 고장 날 확률 · 초록 점: 선택지별 정비 완료 시점 · 빨간 점선: 안전 기준')
 
+    # ① 시스템 효과: 없었다면 → 있으면 (검증 세트 시뮬레이션)
+    sim = D.get('validation_field') if FIELD else D.get('validation')
+    if FIELD and not sim:
+        st.info('이 모델 파일에는 현장 가정 시뮬레이션이 없습니다. python analysis/05_predict_test.py 로 다시 만드세요.')
+    if sim:
+        st.subheader('이 시스템이 없었다면 → 있으면', icon=':material/compare_arrows:')
+        st.caption('검증 세트 72대 시뮬레이션')
+        r1, r2, r3 = sim['regular'], sim['now'], sim['dss']
+        k1, k2, k3 = st.columns(3, border=True)
+        k1.metric('① 시스템 없음: 정기 교체만', won(r1['비용']), f'고장 {r1["고장"]}건', delta_color='off')
+        k2.metric('② 경보만: 켜지면 즉시 교체', won(r2['비용']), f'{won(r2["비용"] - r1["비용"])} · 고장 {r2["고장"]}건',
+                  delta_color='inverse')
+        k3.metric('③ 경보 + 의사결정 지원', won(r3['비용']), f'{won(r3["비용"] - r1["비용"])} · 고장 {r3["고장"]}건',
+                  delta_color='inverse')
+        st.caption(f'정비 관리자가 예측 없이 정기 교체만 하면 고장 {r1["고장"]}건이 그대로 일어납니다. 경보를 따라 바로 교체하면 고장이 '
+                   f'{r2["고장"]}건으로 줄지만, 정기 교체 직전의 경보까지 따로 교체해 정비가 {r2["정비 횟수"]}번 듭니다. '
+                   f'의사결정 지원은 그중 {r3["정기 교체 때"]}건을 정기 교체 때 함께 처리해 계획 밖 정지를 '
+                   f'{r2["계획 밖 정지(h)"]:.0f} → {r3["계획 밖 정지(h)"]:.0f}시간으로 줄입니다. '
+                   f'**시뮬레이션에 따른 예상 절감액: {won(r1["비용"] - r3["비용"])} ({(r1["비용"] - r3["비용"]) / r1["비용"]:.0%}, ① 대비)**. '
+                   + ('현장 가정(만 원, 기본 가정값)으로 계산한 값으로 실제 운영 결과가 아닙니다. ' if FIELD else
+                      '점수는 데이터셋 비용 규칙이며 실제 돈이 아닙니다. ')
+                   + '정답을 알 수 없는 관측 끝부분의 경보는 빠져 있습니다(analysis/10_dss_policy.py).')
+
     # ⑤ 조치 기록과 점검 되먹임
     with st.expander('조치 기록과 점검 되먹임', icon=':material/history:'):
         fb = feedback()
@@ -926,6 +1040,11 @@ elif page == '의사결정':
             st.caption('같은 데이터·같은 모델 예측으로 세 정책을 돌려 실제 고장 시각으로 채점했습니다. '
                        '준비 시간·안전 기준을 바꾼 민감도는 analysis/10_dss_policy.py에 있습니다.')
 
+    with st.expander('이 화면 보는 법', icon=':material/help:'):
+        st.markdown('- 경보 설비마다 정비 선택지(지금 / N시간 뒤 / 다음 정기 교체 때)의 **기대 총비용 = 정비 비용 + 생산 차질 비용 + '
+                    '고장 확률 × 고장 시 손실**을 비교해 추천합니다.\n'
+                    '- 안전 기준과 실행 가능성(정비팀·부품 준비)은 비용보다 먼저 지킵니다.\n'
+                    '- 판단은 검증 가능한 예측값과 계산·규칙으로만 하며, 최종 결정은 정비 책임자가 합니다.')
 
 # 4. 모델 정보
 

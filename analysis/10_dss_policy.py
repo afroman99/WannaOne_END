@@ -27,7 +27,7 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from src.dss import Costs, DSSConfig, episodes, failure_curve, simulate
+from src.dss import Costs, DSSConfig, episodes, failure_curve, field_costs, simulate
 from src.evaluate import evaluate, failure_events
 from src.features import TARGET_COLS, make_features, make_targets_hourly, normal_scenarios, state_outcomes
 from src.model import FEATURES, FINAL, MODELS, fold_features
@@ -183,6 +183,31 @@ for prep_h in [4, 12]:
         row['1시간 − 6시간'] = row['개선 1 (1시간) 비용'] - row['중간발표 (6시간) 비용']
         pen[(prep_h, penalty, cfg.costs.failure_loss)] = row
 print(pd.DataFrame(pen).T.rename_axis(['준비 시간', '고장 벌점', '고장 시 손실']).to_string())
+
+section('4. 현장 가정 (만 원, 정건우 현장 경험): 소모품 100 · 중요 부품 개당 200 · 공임 파트당 20 · 인력 3/시간·명(4인 1팀) · 정지 1시간 500 · 고장 추가 300')
+FIELD = replace(CFG, costs=field_costs())
+c = FIELD.costs
+print(f'지금 두 부품 교체 {2 * c.part + c.replace_fixed + c.replace_h * c.downtime_h:,.0f} · 정기 교체 때 추가 {c.part:,.0f} · 고장 {c.failure_loss:,.0f} (만 원)')
+for label, inputs in [('학습 세트 교차검증', train_inputs), ('검증 세트', val_inputs)]:
+    rows = {}
+    for name, m in MODELS_USED.items():
+        pts, prob = inputs[name]
+        res = {p: simulate(pts, prob, m['th'], curves[name], FIELD, policy=p)['summary'] for p in POLICIES}
+        for p, r in res.items():
+            rows[(name, r['정책'])] = {'비용 (만 원)': r['비용'], '예상 절감액 (① 대비)': res['regular']['비용'] - r['비용'],
+                                      '고장': r['고장'], '정기 교체 때': r['정기 교체 때'], '계획 밖 정지(h)': r['계획 밖 정지(h)']}
+    print(f'\n{label}')
+    print(pd.DataFrame(rows).T.to_string())
+
+print('\n민감도: 정지 1시간 생산 차질 비용 (만 원, 검증 세트, ③ DSS, 개선 1 모델)')
+sens = {}
+for dt in [0, 100, 500, 1000]:
+    cfg = replace(CFG, costs=field_costs(downtime_h=dt))
+    pts, prob = val_inputs['개선 1 (1시간)']
+    res = {p: simulate(pts, prob, MODELS_USED['개선 1 (1시간)']['th'], curves['개선 1 (1시간)'], cfg, policy=p)['summary'] for p in POLICIES}
+    sens[dt] = {'① 정기 교체만': res['regular']['비용'], '② 경보 즉시 교체': res['now']['비용'], '③ DSS': res['dss']['비용'],
+                '③ 절감액 (① 대비)': res['regular']['비용'] - res['dss']['비용']}
+print(pd.DataFrame(sens).T.rename_axis('생산 차질 (만 원/시간)').to_string())
 
 print('\nDSS 판단 (검증 세트, 개선 1 모델)')
 e = val_eps['개선 1 (1시간)']

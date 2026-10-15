@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from src.evaluate import (CAUTION_MIN_PRECISION, caution_report, caution_sweep, choose_caution_threshold, choose_threshold,
                           degraded_now, evaluate, failure_events, unlabeled_alarms)
-from src.dss import DSSConfig, episodes, failure_curve, simulate
+from src.dss import DSSConfig, episodes, failure_curve, field_costs, simulate
 from src.features import build_dataset, make_features, make_prediction_points, state_outcomes
 from src.model import CAUTION_FINAL, FEATURES, FINAL, MODELS, PRED_STEP_H, fold_features, oof_from_folds
 from src.posko_data import load_answer, load_scenarios
@@ -148,7 +148,11 @@ so_va = state_outcomes(v_ids, step_h=PRED_STEP_H)
 f_va = make_features(hr[hr['SCENARIO_ID'].isin(v_ids)], so_va)
 p_va = model.predict_proba(f_va[cols].values.astype(float))[:, 1]
 dss_val = {p: simulate(so_va, p_va, th, curve, DSSConfig(), policy=p)['summary'] for p in ['regular', 'now', 'dss']}
+# 현장 가정(만 원)으로도 같은 시뮬레이션 (대시보드의 비용 기준 전환용)
+dss_val_field = {p: simulate(so_va, p_va, th, curve, DSSConfig(costs=field_costs()), policy=p)['summary']
+                 for p in ['regular', 'now', 'dss']}
 print('DSS 정책 비용 (검증 세트): ' + ' · '.join(f'{r["정책"]} {r["비용"]:.0f}' for r in dss_val.values()))
+print('  현장 가정(만 원): ' + ' · '.join(f'{r["정책"]} {r["비용"]:,.0f}' for r in dss_val_field.values()))
 
 bundle = {
     'caution': {'model': caution_model, 'threshold': c_th, 'features': c_cols, 'final': CAUTION_FINAL,
@@ -156,7 +160,7 @@ bundle = {
     'model': model, 'threshold': th, 'features': cols, 'params': params, 'final': FINAL, 'step_h': PRED_STEP_H,
     # 입력 감시: 학습 세트 특징의 0.1~99.9% 범위 (결측은 무시). 서비스에서 이 범위 밖이면 현장 확인을 띄운다
     'feature_range': {'lo': train[cols].quantile(0.001).tolist(), 'hi': train[cols].quantile(0.999).tolist()},
-    'dss': {'curve': curve, 'config': DSSConfig(), 'validation': dss_val},
+    'dss': {'curve': curve, 'config': DSSConfig(), 'validation': dss_val, 'validation_field': dss_val_field},
     'created_at': pd.Timestamp.now(tz='Asia/Seoul').strftime('%Y-%m-%d %H:%M'),
     'n_train_points': len(train),
     'validation': {'point': res['point'], 'event': res['event'], 'cost': res['cost'],

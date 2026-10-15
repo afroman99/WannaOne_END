@@ -98,7 +98,7 @@ def export(out_dir=APP_DIR):
         'caution': ({'threshold': c['threshold'], 'features': list(c['features']), 'final': c['final'],
                      'min_precision': c['min_precision'], 'validation': c['validation']} if c else None),
         'dss': ({'config': dataclasses.asdict(d['config']), 'curve': {'h': d['curve'].index.tolist(), 'F': d['curve'].tolist()},
-                 'validation': d['validation']} if d else None),
+                 'validation': d['validation'], 'validation_field': d.get('validation_field')} if d else None),
     }
     (out_dir / 'meta.json').write_text(json.dumps(_plain(meta), ensure_ascii=False, indent=1), encoding='utf-8')
     files = sorted(f.name for f in out_dir.iterdir() if f.name != 'MANIFEST.json')

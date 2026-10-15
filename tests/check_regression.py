@@ -160,6 +160,13 @@ if D:
     check('계획이 없으면 지금 교체', decide({'WAIT_H': np.nan}, D['curve'], DSSConfig(), 'dss')[0] == 'now')
     check('준비 시간 24시간이면 3시간 뒤 정기 교체를 기다리지 않는다',
           decide({'WAIT_H': 3}, D['curve'], DSSConfig(prep_h=24), 'dss')[0] == 'now')
+    from src.dss import field_costs
+    fc = field_costs()
+    check('현장 가정(만 원): 지금 교체 2,588 · 정기 교체 때 추가 220 · 고장 4,716',
+          (2 * fc.part + fc.unnecessary + fc.replace_fixed + fc.replace_h * fc.downtime_h, fc.part, fc.failure_loss) == (2588, 220, 4716))
+    vf = D.get('validation_field') or {}
+    check('현장 가정 검증 세트 정책 비용 (만 원) ① 75,456 ② 63,780 ③ 54,308',
+          {k: round(v['비용']) for k, v in vf.items()} == {'regular': 75456, 'now': 63780, 'dss': 54308}, str({k: round(v['비용']) for k, v in vf.items()}))
     check('안전 기준을 넘으면 지금 교체 (30시간 기다림)',
           decide({'WAIT_H': 30}, D['curve'], DSSConfig(), 'dss')[0] == 'now')
 

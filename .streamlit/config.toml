@@ -22,3 +22,23 @@ gatherUsageStats = false
 [runner]
 # 실패한 화면 갱신이 남지 않게
 fastReruns = true
+
+[theme]
+# 가독성 (팀원 피드백 2026-10-15): 한글 글꼴을 지정하고, 제목 크기를 줄이고, 상태 색을 의미에 맞춘다
+base = "light"
+font = "'Noto Sans KR':https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap"
+baseFontSize = 15
+headingFontSizes = ["1.9rem", "1.45rem", "1.2rem"]
+headingFontWeights = [700, 700, 600]
+primaryColor = "#2f5d8a"            # 강철 파랑: 선택된 버튼·슬라이더
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f3f5f7"
+textColor = "#1d2329"
+borderColor = "#dde1e5"
+redColor = "#c23b3b"                # 경보·즉시 조치
+orangeColor = "#c98a12"             # 주의
+greenColor = "#2e7d4f"              # 정상·충족
+blueColor = "#2f5d8a"
+grayColor = "#6b7480"
+baseRadius = "0.5rem"
+dataframeHeaderBackgroundColor = "#eef1f4"

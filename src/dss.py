@@ -47,18 +47,42 @@ PARTS = ['valve', 'oscillator']
 
 @dataclass
 class Costs:
-    """비용 가정값 (기본값 = 데이터셋 비용 규칙, toolkit/targets.md. 점수이며 실제 돈이 아니다)"""
-    part: float = 12.0              # 부품 하나 교체 비용
+    """비용 가정값 (기본값 = 데이터셋 비용 규칙, toolkit/targets.md. 점수이며 실제 돈이 아니다)
+
+    현장 가정(만 원)은 field_costs()를 쓴다. 두 기준 모두 같은 식으로 계산한다:
+      지금 두 부품 교체 = 부품 2개 + 불필요 정비 + 소모품 + 교체 시간 × (인력 + 생산 차질)
+      정기 교체 때 다른 부품 추가 = 부품 1개 (+ 그 부품이 멀쩡하면 불필요 정비). 계획 정지라 생산 차질·추가 인력 없음
+      고장 시 손실 = 복구 + 복구 시간 × (인력 + 생산 차질) + 고장 추가 손실
+    """
+    part: float = 12.0              # 부품 하나 교체 비용 (부품값 + 그 부품의 공임)
     downtime_h: float = 2.0         # 계획 밖 정지 1시간의 생산 차질 비용
     replace_h: float = 4.0          # 교체 시간
-    repair: float = 30.0            # 고장 후 복구 비용
+    repair: float = 30.0            # 고장 후 복구 비용 (인력·생산 차질 제외)
     repair_h: float = 8.0           # 복구 시간 (계획 밖 정지)
-    failure_penalty: float = 20.0   # 고장 벌점 (안전·품질 영향의 대리값)
-    unnecessary: float = 8.0        # 멀쩡한 부품을 바꾼 불필요 정비 벌점
+    failure_penalty: float = 20.0   # 고장 추가 손실 (데이터셋: 고장 벌점. 안전·품질 영향의 대리값)
+    unnecessary: float = 8.0        # 멀쩡한 부품을 바꾼 불필요 정비 벌점 (현장 가정에서는 부품값에 이미 들어 있어 0)
+    consumables: float = 0.0        # 교체 한 번의 소모품 (볼트·너트·O링·윤활유 등)
+    labor_h: float = 0.0            # 정비 인력 1시간 비용 (팀 전체)
+    unit: str = '점'
 
     @property
-    def failure_loss(self):         # 고장 시 손실 = 복구 + 복구 동안 생산 차질 + 고장 벌점 (기본 66)
-        return self.repair + self.repair_h * self.downtime_h + self.failure_penalty
+    def failure_loss(self):         # 고장 시 손실 (데이터셋 기본 66점)
+        return self.repair + self.repair_h * (self.downtime_h + self.labor_h) + self.failure_penalty
+
+    @property
+    def replace_fixed(self):        # 교체 한 번에 부품과 별도로 드는 비용 (소모품 + 교체 시간 인력)
+        return self.consumables + self.replace_h * self.labor_h
+
+
+def field_costs(consumables=100.0, major_part=200.0, labor_per_part=20.0, labor_per_person_h=3.0, crew_size=4,
+                downtime_h=500.0, failure_extra=300.0):
+    """현장 가정 (만 원, 2026-10-15 정건우 현장 경험): 소모품 100 · 중요 부품 개당 200 · 공임 파트당 20 · 인력 시간당 3/명 ·
+    정지 1시간 생산 차질 500 · 고장 1건 추가 손실 300. 밸브·진동장치는 중요 부품, 정비팀은 4인 1팀(현장: 보통 3~4인). 고장 복구는 고장 난 부품 하나와 소모품을 쓴다(사용자 확인 2026-10-15).
+    고장 복구는 고장 난 부품 하나를 바꾸고 소모품을 쓴다(8시간)."""
+    part = major_part + labor_per_part
+    return Costs(part=part, downtime_h=downtime_h, replace_h=4.0, repair=consumables + part, repair_h=8.0,
+                 failure_penalty=failure_extra, unnecessary=0.0, consumables=consumables,
+                 labor_h=labor_per_person_h * crew_size, unit='만 원')
 
 
 @dataclass
@@ -142,11 +166,13 @@ def options(wait_h, curve, cfg, elapsed=0.0, delay_h=None, delay_downtime_h=None
     """
     c = cfg.costs
     po = p_override or {}
-    two_parts = 2 * c.part + c.unnecessary                       # 두 부품 교체 (하나는 멀쩡하다고 본다): 24 + 8 = 32
+    two_parts = 2 * c.part + c.unnecessary + c.replace_fixed     # 두 부품 교체 (하나는 멀쩡하다고 본다): 데이터셋 24 + 8 = 32
     start_now = max(cfg.crew_wait_h, cfg.prep_h - c.replace_h)    # 정비팀·부품이 준비되는 시각
     out = [_option('지금 두 부품 교체', start_now + c.replace_h, two_parts, c.replace_h * c.downtime_h, curve, cfg, elapsed,
                    po.get('지금 두 부품 교체'),
-                   f'부품 {2 * c.part:.0f} + 불필요 정비 {c.unnecessary:.0f}(두 부품 중 하나는 멀쩡) · 정지 {c.replace_h:.0f}시간 × {c.downtime_h:.0f}'
+                   (f'부품·공임 {2 * c.part:,.0f} + 소모품 {c.consumables:,.0f} + 인력 {c.replace_h:.0f}시간 × {c.labor_h:,.0f}'
+                    if c.consumables or c.labor_h else f'부품 {2 * c.part:.0f} + 불필요 정비 {c.unnecessary:.0f}(두 부품 중 하나는 멀쩡)')
+                   + f' · 정지 {c.replace_h:.0f}시간 × 생산 차질 {c.downtime_h:,.0f}'
                    + (f' · 정비팀·부품 준비까지 {start_now:.0f}시간' if start_now > 0 else ''))]
     if delay_h is not None and delay_h > start_now:
         rate = c.downtime_h if delay_downtime_h is None else delay_downtime_h
@@ -219,7 +245,7 @@ def score(row, action, cause, cfg=None):
             return '늦은 경보 → 고장', c.failure_loss, c.repair_h
         n_bad = 1 if row['EV'] == 1 else 2                      # 고장 예정이면 하나는 원인 부품, 아니면 둘 다 멀쩡
         return (('교체로 고장 막음' if row['EV'] == 1 else '불필요 교체'),
-                2 * c.part + c.replace_h * c.downtime_h + n_bad * c.unnecessary, c.replace_h)
+                2 * c.part + c.replace_fixed + c.replace_h * c.downtime_h + n_bad * c.unnecessary, c.replace_h)
     # 기다림: 정기 교체가 시작되기 전에 고장 나면 실패
     if lead <= row['WAIT_H']:
         return '기다리다 고장', c.failure_loss, c.repair_h

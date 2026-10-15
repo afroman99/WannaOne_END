@@ -77,8 +77,8 @@ class Costs:
 def field_costs(consumables=100.0, major_part=200.0, labor_per_part=20.0, labor_per_person_h=3.0, crew_size=4,
                 downtime_h=500.0, failure_extra=300.0):
     """현장 가정 (만 원, 2026-10-15 정건우 현장 경험): 소모품 100 · 중요 부품 개당 200 · 공임 파트당 20 · 인력 시간당 3/명 ·
-    정지 1시간 생산 차질 500 · 고장 1건 추가 손실 300. 밸브·진동장치는 중요 부품, 정비팀은 4인 1팀(현장: 보통 3~4인). 고장 복구는 고장 난 부품 하나와 소모품을 쓴다(사용자 확인 2026-10-15).
-    고장 복구는 고장 난 부품 하나를 바꾸고 소모품을 쓴다(8시간)."""
+    정지 1시간 생산 차질 500 · 고장 1건 추가 손실 300. 밸브·진동장치는 중요 부품, 정비팀은 4인 1팀(현장: 보통 3~4인).
+    고장 복구는 고장 난 부품 하나를 바꾸고 소모품을 쓴다(8시간, 사용자 확인 2026-10-15)."""
     part = major_part + labor_per_part
     return Costs(part=part, downtime_h=downtime_h, replace_h=4.0, repair=consumables + part, repair_h=8.0,
                  failure_penalty=failure_extra, unnecessary=0.0, consumables=consumables,

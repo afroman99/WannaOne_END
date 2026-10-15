@@ -32,6 +32,7 @@ import pandas as pd
 TEAMS = {'정비 1팀': ['김 반장', '이 기사', '박 기사', '최 기사'], '정비 2팀': ['정 반장', '강 기사', '조 기사', '윤 기사']}
 PRIORITIES = ['긴급', '높음', '보통']
 OUTCOMES = ['이상 없음', '이상 발견', '추가 점검 필요']
+STATUSES = ['대기', '진행 중', '완료']
 JUDGED = ['valve', 'oscillator', '구분 못함']
 CONFIRMED = ['valve', 'oscillator', '아직 모름']
 LIMITS = {'title': 80, 'guide': 600, 'reason': 600, 'details': 500, 'option': 60}
@@ -220,6 +221,32 @@ class TaskStore:
         h = _hour(hour)
         return self._update(task_id, {'completed_h': h, 'outcome': outcome, 'details': details, 'judged': judged,
                                       'confirmed': confirmed, 'completed_at': _now()}, where_open=True)
+
+    def set_status(self, task_id, status, hour, outcome='', details='', judged='구분 못함', confirmed='아직 모름'):
+        """설비관리자가 작업 상태를 직접 바꾼다 (잘못 누른 시작·완료 되돌리기 포함). 상태는 시작·완료 시각으로 정해진다.
+        대기       시작·완료 시각과 완료 보고를 지운다
+        진행 중    완료 시각과 완료 보고를 지운다 (시작 시각이 없으면 hour로)
+        완료       완료 보고가 있어야 한다 (complete와 같은 검사). 시작 시각이 없으면 hour로
+        반환: 바뀌었으면 True"""
+        h = _hour(hour)
+        df = self.all()
+        df = df[df['id'] == int(task_id)]
+        if df.empty or status not in STATUSES:
+            raise ValueError('없는 작업이거나 정해진 상태가 아님')
+        started = float(df.iloc[0]['started_h']) if pd.notna(df.iloc[0]['started_h']) else None
+        clear = {'completed_h': None, 'outcome': '', 'details': '', 'judged': '', 'confirmed': '', 'completed_at': ''}
+        if status == '대기':
+            return self._update(task_id, {'started_h': None, **clear})
+        if status == '진행 중':
+            return self._update(task_id, {'started_h': started if started is not None else h, **clear})
+        details = clean(details, LIMITS['details'])
+        if outcome not in OUTCOMES or judged not in JUDGED or confirmed not in CONFIRMED:
+            raise ValueError('결과·부품은 정해진 값만')
+        if not details:
+            raise ValueError('수행 내용을 입력해야 완료할 수 있습니다')
+        return self._update(task_id, {'started_h': started if started is not None else h, 'completed_h': max(h, started or h),
+                                      'outcome': outcome, 'details': details, 'judged': judged, 'confirmed': confirmed,
+                                      'completed_at': _now()})
 
     def edit_report(self, task_id, outcome, details, judged, confirmed):
         """완료 보고 고치기 (설비관리자): 이미 완료된 작업만. 완료 시각은 그대로 둔다"""

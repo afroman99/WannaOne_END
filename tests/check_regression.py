@@ -326,6 +326,20 @@ for _name, _path in [('세션', None), ('SQLite', Path(_tf.mkdtemp()) / 't.sqlit
     check(f'작업 지시({_name}): 완료된 작업의 보고를 고칠 수 있고(완료 시각 유지), 완료 전 작업은 보고 수정 불가',
           _fix and _row['outcome'] == '추가 점검 필요' and _row['confirmed'] == 'oscillator' and _row['completed_h'] == 73
           and not _s.edit_report(_open_id, '이상 발견', 'x', 'valve', 'valve'))
+_ss = _tk.TaskStore(None)
+_ss.add('test', 'S0294', 't', '정비 1팀', '긴급', 60, 60, 'g', 'r')
+_st = lambda: _ss.frame('test', 72).iloc[0]['상태']
+_flow = []
+for _to in ['진행 중', '대기']:
+    _ss.set_status(1, _to, 65)
+    _flow.append(_st())
+_ss.set_status(1, '완료', 70, '이상 발견', '교체', 'valve', 'valve')
+_flow.append(_st())
+_ss.set_status(1, '진행 중', 71)
+_flow.append(_st())
+check('작업 상태를 설비관리자가 바꿀 수 있다 (대기·진행 중·완료, 완료를 되돌리면 완료 보고 지움, 빈 보고로는 완료 불가)',
+      _flow == ['진행 중', '대기', '완료', '진행 중'] and _ss.frame('test', 72).iloc[0]['outcome'] == ''
+      and raises(lambda: _ss.set_status(1, '완료', 71, '이상 발견', ' '), ValueError))
 check('작업 지시: 정해진 팀·우선순위가 아니면 배정하지 않는다',
       raises(lambda: _tk.TaskStore(None).add('test', 'S0294', 't', '외부 업체', '긴급', 1, 1, '', ''), ValueError)
       and raises(lambda: _tk.TaskStore(None).add('test', '../x', 't', '정비 1팀', '긴급', 1, 1, '', ''), ValueError))

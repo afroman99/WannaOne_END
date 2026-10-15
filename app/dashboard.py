@@ -367,9 +367,12 @@ def stock_now(cfg):
         if r.PART_CD in PARTS:
             out[r.SCENARIO_ID][r.PART_CD] = max(0, out[r.SCENARIO_ID][r.PART_CD] - 1)
     lg = LOG.frame(split, now)
-    for _, r in lg[lg['종류'] == '작업 완료'].iterrows():
+    # 작업 완료(두 부품 교체)마다 부품을 쓴다. 설비관리자가 완료를 되돌린 기록('… 완료 → …')은 그만큼 돌려놓는다
+    used = (lg[lg['종류'] == '작업 완료'].groupby('설비').size()
+            .sub(lg[lg['메모'].astype(str).str.contains('완료 → ', regex=False)].groupby('설비').size(), fill_value=0))
+    for sid_, n_ in used.items():
         for q in PARTS:
-            out[r['설비']][q] = max(0, out[r['설비']][q] - 1)
+            out[sid_][q] = max(0, out[sid_][q] - int(max(0, n_)))
     for _, r in lg[lg['종류'] == '부품 발주'].iterrows():
         arrive = r['시각(h)'] + (cfg.parts.rush_h if r['선택지'] == '긴급' else cfg.parts.lead_h)
         if arrive <= now and r['부품'] in PARTS:
@@ -993,30 +996,45 @@ else:
                                        format_func=lambda i: f'#{i} · {tfi.loc[i, "title"]} · {tfi.loc[i, "상태"]}')
                     cur = tfi.loc[tid]
                     done_ = cur['상태'] == '완료'
+                    # 상태는 폼 밖에서 고른다: '완료'를 고르면 아래에 완료 보고 칸이 바로 나타나게
+                    e_state = st.segmented_control('작업 상태', tasks.STATUSES, default=cur['상태'], required=True,
+                                                   key=f'edit_state_{tid}',
+                                                   help='대기·진행 중으로 되돌리면 완료 보고가 지워집니다. 완료로 바꾸려면 완료 보고가 필요합니다.')
                     with st.form(f'edit_task_{tid}', border=False):
                         e_team = st.selectbox('담당 팀', list(tasks.TEAMS), index=list(tasks.TEAMS).index(cur['team']))
                         e_prio = st.selectbox('우선순위', tasks.PRIORITIES, index=tasks.PRIORITIES.index(cur['priority']))
                         e_due = st.number_input('시작 예정 (h)', 0.0, 240.0, float(cur['due_h']), 1.0, format='%.0f')
                         e_guide = st.text_area('점검 가이드', value=cur['guide'], max_chars=tasks.LIMITS['guide'])
                         e_reason = st.text_area('추천 이유', value=cur['reason'], max_chars=tasks.LIMITS['reason'])
-                        if done_:
-                            st.markdown(f'**완료 보고** (완료 {cur["completed_h"]:.0f}시간)')
+                        if e_state == '완료':
+                            st.markdown('**완료 보고**' + (f' (완료 {cur["completed_h"]:.0f}시간)' if done_ else f' (지금 {now}시간에 완료로 기록)'))
                             pick = lambda opts, v, d: opts.index(v) if v in opts else opts.index(d)
                             e_out = st.selectbox('작업 결과', tasks.OUTCOMES, index=pick(tasks.OUTCOMES, cur['outcome'], '이상 발견'))
                             e_jud = st.selectbox('점검으로 판단한 부품', tasks.JUDGED, index=pick(tasks.JUDGED, cur['judged'], '구분 못함'),
                                                  format_func=lambda x: PART_NAMES.get(x, x))
                             e_con = st.selectbox('교체 뒤 확인된 원인 부품', tasks.CONFIRMED,
                                                  index=pick(tasks.CONFIRMED, cur['confirmed'], '아직 모름'), format_func=lambda x: PART_NAMES.get(x, x))
-                            e_det = st.text_area('수행 내용', value=cur['details'], max_chars=tasks.LIMITS['details'])
+                            e_det = st.text_area('수행 내용', value=cur['details'] if done_ else '', max_chars=tasks.LIMITS['details'])
                         if st.form_submit_button('수정 저장', type='primary'):
                             try:
                                 TASKS.edit(tid, e_team, e_prio, e_due, e_guide, e_reason)
-                                if done_:
+                                if e_state != cur['상태']:
+                                    # 상태 변경: 작업 기록을 바꾸고, 진행 단계 기록(src/actions.py)에도 남겨 화면 전체가 같은 상태를 본다
+                                    if e_state == '완료':
+                                        TASKS.set_status(tid, '완료', now, e_out, e_det, e_jud, e_con)
+                                        LOG.record('작업 완료', split, cur['sid'], now, MANAGER, note=f'상태 변경 #{tid}: {e_det}')
+                                        LOG.record('점검 결과', split, cur['sid'], now, MANAGER, judged=e_jud, confirmed=e_con, note=e_out)
+                                    else:
+                                        TASKS.set_status(tid, e_state, now)
+                                        LOG.record('작업 시작' if e_state == '진행 중' else '승인', split, cur['sid'], now, MANAGER,
+                                                   note=f'상태 변경 #{tid}: {cur["상태"]} → {e_state}')
+                                elif done_:
                                     TASKS.edit_report(tid, e_out, e_det, e_jud, e_con)
                                     if (e_out, e_jud, e_con) != (cur['outcome'], cur['judged'], cur['confirmed']):
                                         LOG.record('점검 결과', split, cur['sid'], float(cur['completed_h']), MANAGER, judged=e_jud,
                                                    confirmed=e_con, note=f'완료 보고 수정 #{tid}: {e_out}')
-                                st.toast(f'#{tid} 수정했습니다', icon=':material/check_circle:')
+                                st.toast(f'#{tid} 수정했습니다' + (f' ({cur["상태"]} → {e_state})' if e_state != cur['상태'] else ''),
+                                         icon=':material/check_circle:')
                                 st.rerun()
                             except ValueError as err:
                                 st.error(str(err))

@@ -115,7 +115,7 @@ def load(app_dir=APP_DIR):
 
     MANIFEST.json의 SHA-256과 다르거나 목록에 없는 파일이 있으면 멈춘다.
     """
-    from src.dss import Costs, DSSConfig
+    from src.dss import Costs, DSSConfig, PartsPolicy
 
     app_dir = Path(app_dir)
     manifest = json.loads((app_dir / 'MANIFEST.json').read_text(encoding='utf-8'))
@@ -133,6 +133,7 @@ def load(app_dir=APP_DIR):
     if m.get('dss'):
         conf = dict(m['dss']['config'])
         conf['costs'] = Costs(**conf['costs'])
+        conf['parts'] = PartsPolicy(**conf['parts']) if 'parts' in conf else PartsPolicy()
         m['dss']['config'] = DSSConfig(**conf)
         m['dss']['curve'] = pd.Series(m['dss']['curve']['F'], index=m['dss']['curve']['h'], name='F')
     data = {}

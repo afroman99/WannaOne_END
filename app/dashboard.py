@@ -35,8 +35,9 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from src.posko_data import load_scenarios
-from src.dss import fail_prob, field_costs, options, plans, recommend
+from src.dss import PARTS, PartsPolicy, fail_prob, field_costs, missing_parts, options, plans, recommend
 from src import actions, app_data, ontology
+from src.limitations import LIMITS
 from src.auth import require_login
 from src.serving import cost_curve, explain, failure_hours, load_bundle, score_scenarios
 
@@ -253,13 +254,17 @@ def assumptions():
     """정비 책임자가 정한 가정값 (없으면 기본값 = 모델 파일의 DSS 가정값 + 팀 결정: 정비팀 2팀, 팀당 하루 8공수)"""
     D = bundle.get('dss')
     base, bc = D['config'], D['config'].costs
+    bp = getattr(base, 'parts', PartsPolicy())
     default = {'safety': float(base.safety_max), 'prep': int(base.prep_h), 'crew_wait': int(base.crew_wait_h),
                'n_crews': 2, 'crew_day_h': 8, 'down_h': float(bc.downtime_h), 'penalty': float(bc.failure_penalty),
                'p_other': float(base.p_other_needed), 'max_wait': int(base.max_wait_h), 'delay_h': 0,
                'delay_rate': float(bc.downtime_h),
                # 비용 기준: 데이터셋 점수 / 현장 가정(만 원, 정건우 현장 경험 2026-10-15)
                'mode': COST_MODES[0], 'f_cons': 100.0, 'f_part': 200.0, 'f_labor_part': 20.0, 'f_labor_ph': 3.0,
-               'f_crew': 4, 'f_down': 500.0, 'f_fail': 300.0, 'f_delay_rate': 500.0}
+               'f_crew': 4, 'f_down': 500.0, 'f_fail': 300.0, 'f_delay_rate': 500.0,
+               # 부품 조달 (데이터에 없어 미리 정한 가정값, 정건우 현장 경험 2026-10-15)
+               'stock_v': int(bp.stock_valve), 'stock_o': int(bp.stock_oscillator), 'lead': float(bp.lead_h),
+               'rush_h': float(bp.rush_h), 'rush_mk': float(bp.rush_markup)}
     return {**default, **st.session_state.get('assume', {})}
 
 
@@ -274,14 +279,65 @@ def make_cfg(A):
                             failure_extra=A['f_fail'])
     else:
         costs = replace(base.costs, downtime_h=A['down_h'], failure_penalty=A['penalty'])
+    parts = PartsPolicy(stock_valve=A['stock_v'], stock_oscillator=A['stock_o'], lead_h=A['lead'], rush_h=A['rush_h'],
+                        rush_markup=A['rush_mk'])
     cfg = replace(base, safety_max=A['safety'], prep_h=A['prep'], crew_wait_h=A['crew_wait'], p_other_needed=A['p_other'],
-                  max_wait_h=A['max_wait'], costs=costs)
+                  max_wait_h=A['max_wait'], costs=costs, parts=parts)
     return costs, cfg
+
+
+def stock_now(cfg):
+    """설비마다 지금 남은 예비 재고 {sid: {'valve': n, 'oscillator': n}}.
+    처음 재고 − 고장 복구에 쓴 부품 − 작업 완료(두 부품 교체)에 쓴 부품 + 도착한 발주. 정기 교체 부품은 계획과 함께 들어온다고 본다"""
+    out = {sid: cfg.parts.stock() for sid in pts['SCENARIO_ID'].unique()}
+    for r in mnt_now[mnt_now['종류'] == '고장 후 복구'].itertuples():
+        if r.PART_CD in PARTS:
+            out[r.SCENARIO_ID][r.PART_CD] = max(0, out[r.SCENARIO_ID][r.PART_CD] - 1)
+    lg = LOG.frame(split, now)
+    for _, r in lg[lg['종류'] == '작업 완료'].iterrows():
+        for q in PARTS:
+            out[r['설비']][q] = max(0, out[r['설비']][q] - 1)
+    for _, r in lg[lg['종류'] == '부품 발주'].iterrows():
+        arrive = r['시각(h)'] + (cfg.parts.rush_h if r['선택지'] == '긴급' else cfg.parts.lead_h)
+        if arrive <= now and r['부품'] in PARTS:
+            out[r['설비']][r['부품']] += 1
+    return out
+
+
+def in_transit(cfg):
+    """아직 도착하지 않은 발주 {sid: [(부품, 도착 시각, 긴급 여부)]}"""
+    lg = LOG.frame(split, now)
+    out = {}
+    for _, r in lg[lg['종류'] == '부품 발주'].iterrows():
+        arrive = r['시각(h)'] + (cfg.parts.rush_h if r['선택지'] == '긴급' else cfg.parts.lead_h)
+        if arrive > now:
+            out.setdefault(r['설비'], []).append((r['부품'], arrive, r['선택지'] == '긴급'))
+    return out
+
+
+def procurement(cfg, stock, ids):
+    """주의 설비의 부품 준비: 두 부품 교체에 모자라는 부품과 발주 권고 (발주 시점 = 주의 단계에서 재고 부족)"""
+    trans = in_transit(cfg)
+    rows = []
+    for sid in ids:
+        st_ = stock[sid]
+        coming = {q for q, _, _ in trans.get(sid, [])}
+        short = [q for q in missing_parts(st_, PARTS) if q not in coming]
+        rows.append({'설비': sid, '재고': stock_text(st_),
+                     '발주': ('발주 필요: ' + ', '.join(PART_NAMES[q] for q in short) + f' (정상 {cfg.parts.lead_h:.0f}시간)') if short else
+                            ('도착 예정: ' + ', '.join(f'{PART_NAMES[q]} {a:.0f}h' for q, a, _ in trans.get(sid, []))) if coming else '준비됨',
+                     '_short': short})
+    return pd.DataFrame(rows, columns=['설비', '재고', '발주', '_short'])
+
+
+def stock_text(st_):
+    return f'밸브 {st_["valve"]} · 진동장치 {st_["oscillator"]}'
 
 
 def work_plan(A, t):
     """경보 설비마다 추천 선택지와 정비팀 일정 (우선순위, 하루 작업 한도 포함)"""
     costs, cfg = make_cfg(A)
+    STOCK = stock_now(cfg)
     n_crews, crew_day_h = A['n_crews'], A['crew_day_h']
     delay_h = A['delay_h']
     delay_rate = A['f_delay_rate'] if A['mode'] == COST_MODES[1] else A['delay_rate']
@@ -296,11 +352,14 @@ def work_plan(A, t):
         nxt = pl[(pl['SCENARIO_ID'] == sid) & (pl['PLAN_H'] > now)].sort_values('PLAN_H').head(1)
         wait_h = float(nxt['PLAN_H'].iloc[0] - now) if len(nxt) else np.nan
         part = PART_NAMES.get(nxt['PLAN_PART'].iloc[0], nxt['PLAN_PART'].iloc[0]) if len(nxt) else None
+        plan_part = nxt['PLAN_PART'].iloc[0] if len(nxt) else None
         elapsed = max(0.0, now - t_a) if pd.notna(t_a) else 0.0
         c = replace(cfg, crew_wait_h=cfg.crew_wait_h + crew_extra)
-        opts = options(wait_h, curve, c, elapsed, delay_h=dly, delay_downtime_h=delay_rate, p_override=p_override)
+        opts = options(wait_h, curve, c, elapsed, delay_h=dly, delay_downtime_h=delay_rate, p_override=p_override,
+                       stock=STOCK.get(sid), plan_part=plan_part)
         best, urgent = recommend(opts)
-        return {'t_a': t_a, 'wait_h': wait_h, 'part': part, 'elapsed': elapsed, 'opts': opts, 'best': best, 'urgent': urgent}
+        return {'t_a': t_a, 'wait_h': wait_h, 'part': part, 'plan_part': plan_part, 'elapsed': elapsed, 'opts': opts, 'best': best,
+                'urgent': urgent}
 
     alarm_ids = t.index[t['상태'] == WARN].tolist()
     first = {sid: evaluate_options(sid) for sid in alarm_ids}
@@ -337,7 +396,9 @@ def work_plan(A, t):
         state = LOG.job_state(split, now, MNT_START)
         dec.insert(3, '방법', '점검 후 한 부품' if feedback()['ready'] else '두 부품')
         dec.insert(1, '조치', dec['설비 (시나리오)'].map(lambda x: state.get(x, '대기')))
-    return {'dec': dec, 'need_crew': need_crew, 'per_day': per_day, 'evaluate_options': evaluate_options,
+    if len(dec):
+        dec.insert(4, '재고', dec['설비 (시나리오)'].map(lambda x: stock_text(STOCK[x])))
+    return {'stock': STOCK, 'dec': dec, 'need_crew': need_crew, 'per_day': per_day, 'evaluate_options': evaluate_options,
             'cfg': cfg, 'costs': costs, 'curve': curve, 'pl': pl}
 
 
@@ -471,8 +532,11 @@ if page == '오늘 할 일':
             urgent = focus['제약'].startswith('즉시')
             st.caption('지금 할 일' + (f' · 작업 순서 {int(focus["순위"])}번' if pd.notna(focus['순위']) else ''))
             st.markdown(f'### {sid} — {todo}')
+            miss_ = missing_parts(W['stock'][sid], PARTS if not plan else [q for q in PARTS if q != e.get('plan_part')])
             st.markdown(' '.join(x for x in [':red-badge[:material/emergency: 즉시 조치]' if urgent else '',
-                                               STATE_BADGE.get(fstate, ''), RISK_BADGE.get(risk_word(p_fail, cfg.safety_max), '')] if x))
+                                               STATE_BADGE.get(fstate, ''), RISK_BADGE.get(risk_word(p_fail, cfg.safety_max), ''),
+                                               (f':orange-badge[:material/inventory_2: {", ".join(PART_NAMES[q] for q in miss_)} 재고 없음 · '
+                                                f'긴급 조달 {cfg.parts.rush_h:.0f}시간]') if miss_ else ':green-badge[:material/inventory_2: 부품 준비됨]'] if x))
             st.markdown(f'**{start_h:.0f}시간 → {start_h + costs.replace_h:.0f}시간** · '
                         + (f'{e["wait_h"]:.0f}시간 뒤 정기 교체({e["part"]})에 맞춰 함께 합니다' if plan else
                            '경보가 켜진 지 오래돼 지금 바로 해야 합니다' if urgent else '24시간 안 고장 위험이 있어 지금 교체합니다'))
@@ -539,7 +603,9 @@ if page == '오늘 할 일':
         ct['다음 정기 교체'] = ct['설비'].map(lambda x: f'{nxt.loc[x, "PLAN_H"] - now:.0f}시간 뒤 '
                                         f'({PART_NAMES.get(nxt.loc[x, "PLAN_PART"], nxt.loc[x, "PLAN_PART"])})' if x in nxt.index else '없음')
         ct['할 일'] = np.where(ct['다음 정기 교체'] != '없음', '장비 점검 · 정기 교체 때 두 부품 함께 교체 준비',
-                              '장비 점검 · 두 부품 재고 확인 (경보가 켜지면 교체)')
+                              '장비 점검 (경보가 켜지면 교체)')
+        pr = procurement(cfg, W['stock'], cau).set_index('설비')
+        ct['부품'] = ct['설비'].map(pr['발주'])
         st.dataframe(ct, hide_index=True, key='tbl_check', on_select=lambda: open_detail('tbl_check', ct['설비'].tolist()),
                      selection_mode='single-row')
         st.caption('열화가 시작됐지만 아직 24시간 안 고장 위험은 낮습니다.')
@@ -589,9 +655,15 @@ elif page == '전체 현황':
         parts = pd.DataFrame({'부품': ['밸브', '진동장치'], '지금 교체 (경보 설비)': [n_alarm] * 2,
                               '1~2일 안에 필요할 수 있음 (주의 설비)': [n_caution] * 2})
         parts['합계'] = parts.iloc[:, 1:].sum(axis=1)
+        if bundle.get('dss'):
+            _, cfg_o = make_cfg(assumptions())
+            sk = stock_now(cfg_o)
+            risky = t.index[t['상태'].isin([WARN, CAU])]
+            parts['예비 재고 없는 설비 (경보·주의)'] = [int(sum(sk[x][q] < 1 for x in risky)) for q in PARTS]
         st.dataframe(parts, hide_index=True, width='content')
         cv = CAUTION['validation']
-        st.caption(f'재고가 이보다 적으면 지금 발주를 시작하세요. 주의 중 일부(검증 세트 {cv["주의 묶음"]}번 중 '
+        st.caption(f'설비마다 예비 재고는 가정값(밸브 2 · 진동장치 1, 의사결정 화면의 가정값에서 바꿈)입니다. 재고 없는 설비는 의사결정 화면에서 발주하세요. '
+                   f'주의 중 일부(검증 세트 {cv["주의 묶음"]}번 중 '
                    f'{cv["열화 아닌 설비의 주의"]}번)는 열화가 아니었던 헛걸음입니다.')
 
     st.subheader('설비별 상태', icon=':material/list_alt:')
@@ -798,6 +870,13 @@ elif page == '의사결정':
             A['f_crew'] = g1.number_input('정비팀 인원 (명)', 1, 10, A['f_crew'], 1, help='현장: 보통 3~4인 1팀')
             A['f_down'] = g2.number_input('생산 차질 (정지 1시간)', 0.0, 100000.0, A['f_down'], 50.0)
             A['f_fail'] = g3.number_input('고장 1건 추가 손실 (불량·품질·안전 대응)', 0.0, 100000.0, A['f_fail'], 50.0)
+        st.markdown('**부품 조달 (데이터에 없어 미리 정한 가정값)**')
+        h1, h2, h3, h4, h5 = st.columns(5)
+        A['stock_v'] = h1.number_input('예비 밸브 (설비당)', 0, 10, A['stock_v'], 1, help='정비 기록상 밸브 교체가 진동장치의 약 2배')
+        A['stock_o'] = h2.number_input('예비 진동장치 (설비당)', 0, 10, A['stock_o'], 1)
+        A['lead'] = h3.number_input('정상 조달 (h)', 1.0, 720.0, A['lead'], 12.0)
+        A['rush_h'] = h4.number_input('긴급 조달 (h)', 1.0, 168.0, A['rush_h'], 1.0, help='웃돈을 내고 직접 수령')
+        A['rush_mk'] = h5.number_input('긴급 조달 웃돈 (부품값 대비)', 0.0, 3.0, A['rush_mk'], 0.1)
         st.markdown('**비용 (점, 기본값 = 데이터셋 비용 규칙)**' if not FIELD else '**기타**')
         b1, b2, b3, b4 = st.columns(4)
         if not FIELD:
@@ -858,6 +937,10 @@ elif page == '의사결정':
                 f':violet-badge[방법: {r["방법"]}]'] if x))
             st.markdown(f'기대 총비용 **{won(fb_["기대 총비용"])}** · 완료 전 고장 확률 **{fb_["고장 확률"]:.2f}** '
                         f'(안전 기준 {cfg.safety_max:.2f}) · 완료까지 {fb_["정비 완료까지(h)"]:.0f}시간 · {r["다음 정기 교체"]}')
+            miss_ = missing_parts(W['stock'][fsid], PARTS)
+            st.markdown(f':material/inventory_2: 예비 재고 {stock_text(W["stock"][fsid])}'
+                        + (f' · :orange-badge[{", ".join(PART_NAMES[q] for q in miss_)} 재고 없음 → 긴급 조달 '
+                           f'{cfg.parts.rush_h:.0f}시간, 웃돈 {cfg.parts.rush_markup:.0%}]' if miss_ else ' · 바로 교체 가능'))
             with st.container(horizontal=True, vertical_alignment='bottom'):
                 st.button('승인', icon=':material/check_circle:', type='primary', key='cta_ok', on_click=act,
                           args=('승인', fsid, '정비 책임자', 'cta_memo'), kwargs={'option': fb_['선택지']})
@@ -865,11 +948,15 @@ elif page == '의사결정':
                           args=('보류', fsid, '정비 책임자', 'cta_memo'), kwargs={'option': fb_['선택지']})
                 st.text_input('메모 (선택)', max_chars=actions.MAX_NOTE, key='cta_memo', placeholder='예: 생산 일정 확인 후',
                               label_visibility='collapsed')
-                ordered_ = LOG.orders(split, now, MNT_START).get(fsid, set())
+                coming_ = {q for q, _, _ in in_transit(cfg).get(fsid, [])}
                 for part in actions.PARTS:
-                    st.button(f'{PART_NAMES[part]} 발주' + (' (완료)' if part in ordered_ else ''), icon=':material/local_shipping:',
-                              key=f'cta_order_{part}', disabled=part in ordered_, on_click=act,
-                              args=('부품 발주', fsid, '정비 책임자', 'cta_memo'), kwargs={'part': part})
+                    empty = W['stock'][fsid][part] < 1
+                    st.button(f'{PART_NAMES[part]} ' + ('조달 중' if part in coming_ else
+                                                        f'긴급 조달 ({cfg.parts.rush_h:.0f}h)' if empty else f'보충 발주 ({cfg.parts.lead_h:.0f}h)'),
+                              icon=':material/local_shipping:', key=f'cta_order_{part}', disabled=part in coming_,
+                              type='primary' if empty and part not in coming_ else 'secondary', on_click=act,
+                              args=('부품 발주', fsid, '정비 책임자', 'cta_memo'),
+                              kwargs={'part': part, 'option': '긴급' if empty else '정상'})
             st.caption('승인하면 현장 "오늘 할 일"에서 작업 시작 버튼이 켜집니다. 근거는 아래 "설비별 근거"에서 볼 수 있습니다. '
                        + ('클라우드에서는 기록이 이 브라우저 세션에만 남습니다.' if CLOUD else '기록: actions/action_log.csv'))
 
@@ -1023,8 +1110,24 @@ elif page == '의사결정':
             nxt.set_index('SCENARIO_ID').apply(lambda x: f'{x["PLAN_H"] - now:.0f}시간 뒤 ({PART_NAMES.get(x["PLAN_PART"], x["PLAN_PART"])})', axis=1)
             if len(nxt) else {}).fillna('계획 없음')
         cd['할 일'] = np.where(cd['다음 정기 교체'] != '계획 없음', '장비 점검, 정기 교체 때 두 부품 함께 교체 준비',
-                              f'장비 점검, 두 부품 재고 확인 (조달 {cfg.prep_h:.0f}시간 가정. 경보가 켜지면 지금 교체 대상)')
+                              '장비 점검 (경보가 켜지면 지금 교체 대상)')
+        pr = procurement(cfg, W['stock'], cau).set_index('설비')
+        cd['재고'] = cd['설비 (시나리오)'].map(pr['재고'])
+        cd['부품'] = cd['설비 (시나리오)'].map(pr['발주'])
+        need_order = [(sid, q) for sid, qs in pr['_short'].items() for q in qs]
+        if need_order:
+            with st.container(border=True, horizontal=True, vertical_alignment='center'):
+                st.markdown(f'**주의 설비 부품 발주 {len(need_order)}건** — 경보 전에 정상 조달({cfg.parts.lead_h:.0f}시간)로 재고를 채웁니다')
+                st.space('stretch')
+
+                def order_all():
+                    for sid_, q_ in need_order:
+                        LOG.record('부품 발주', split, sid_, now, '정비 책임자', part=q_, option='정상', note='주의 단계 재고 부족')
+                    st.toast(f'부품 {len(need_order)}건 발주', icon=':material/local_shipping:')
+                st.button('한 번에 발주', icon=':material/local_shipping:', type='primary', on_click=order_all, key='order_all')
         st.dataframe(cd, hide_index=True)
+        st.caption(f'발주 시점: 주의 단계에서 두 부품 교체에 모자라는 재고가 있을 때(정상 조달 {cfg.parts.lead_h:.0f}시간). '
+                   f'경보 때 재고가 없으면 긴급 조달({cfg.parts.rush_h:.0f}시간, 웃돈 {cfg.parts.rush_markup:.0%})로 교체가 늦어집니다.')
 
     # ⑦ 정책 시뮬레이션 상세
     if sim:
@@ -1094,6 +1197,15 @@ elif page == '모델 정보':
     st.caption('리드타임: 고장 4시간 전까지 난 경보 중 가장 이른 경보부터 고장까지의 시간. '
                '자세한 근거는 reports/연주_조기경보_결과보고서.md 4절과 부록 B')
 
+
+    st.subheader('한계와 대응 방안', icon=':material/report:')
+    lim = pd.DataFrame(LIMITS)
+    pick = st.pills('중요도', ['높음', '중간', '낮음'], selection_mode='multi', default=['높음', '중간', '낮음'], key='lim_pick')
+    lim = lim[lim['중요도'].isin(pick or [])]
+    st.dataframe(lim[['중요도', '구분', '한계', '영향', '지금 대응', '추가 대응', '근거']], hide_index=True,
+                 column_config={c: st.column_config.TextColumn(width='large') for c in ['영향', '지금 대응', '추가 대응']})
+    st.caption('돌발 고장·원인 부품·리드타임처럼 모델만으로 풀 수 없는 한계는 운영(정기 교체 유지, 점검 결과 되먹임, 예비 재고와 주의 단계 발주)으로 메웁니다. '
+               '자세한 내용은 결과보고서 12절.')
 
     st.subheader('온톨로지: 지금 상태를 하나의 그래프로', icon=':material/account_tree:')
     g = ontology_graph(assumptions(), status_table())

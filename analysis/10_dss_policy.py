@@ -2,6 +2,9 @@
 
     python analysis/10_dss_policy.py      # 약 5분
 
+부품 조달 (5절): 데이터에 재고·조달 기간이 없어 가정값을 미리 정해 넣는다(강사 피드백 2026-10-15, 값은 정건우 현장 경험).
+  설비마다 예비 밸브 2 · 진동장치 1, 정상 조달 72시간, 긴급 조달 12시간(부품값 +50%). 1~4절도 이 기본값으로 계산한다.
+
 정책
   ① 정기 교체만     경보를 쓰지 않는다 (데이터에 있던 정기 교체만)
   ② 경보 즉시 교체  경보가 켜지면 바로 두 부품 교체 (보고서의 비용 규칙)
@@ -27,7 +30,7 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from src.dss import Costs, DSSConfig, episodes, failure_curve, field_costs, simulate
+from src.dss import Costs, DSSConfig, PartsPolicy, episodes, failure_curve, field_costs, simulate
 from src.evaluate import evaluate, failure_events
 from src.features import TARGET_COLS, make_features, make_targets_hourly, normal_scenarios, state_outcomes
 from src.model import FEATURES, FINAL, MODELS, fold_features
@@ -212,3 +215,34 @@ print(pd.DataFrame(sens).T.rename_axis('생산 차질 (만 원/시간)').to_stri
 print('\nDSS 판단 (검증 세트, 개선 1 모델)')
 e = val_eps['개선 1 (1시간)']
 print(e[['SCENARIO_ID', '경보 시각(h)', '정기 교체까지(h)', '판단', '결과', '비용', '근거']].to_string(index=False))
+
+
+# 5. 부품 조달 가정 (데이터에 없음, 미리 정한 값과 민감도)
+
+section('5. 부품 조달: 예비 재고 밸브 2 · 진동장치 1, 정상 조달 72시간, 긴급 조달 12시간(부품값 +50%)')
+print('정상 조달 72시간은 72시간 시나리오 안에 도착하지 못해, 재고가 모자라면 긴급 조달로 계산한다(웃돈 + 부품이 올 때까지 대기).')
+m1 = MODELS_USED['개선 1 (1시간)']
+for label, inputs in [('학습 세트 교차검증', train_inputs), ('검증 세트', val_inputs)]:
+    pts, prob = inputs['개선 1 (1시간)']
+    for cname, costs in [('점수', Costs()), ('만 원', field_costs())]:
+        rows = {}
+        for sname, parts in [('재고 무제한 (이전 계산)', PartsPolicy(99, 99)), ('기본: 밸브 2 · 진동장치 1', PartsPolicy()),
+                             ('밸브 1 · 진동장치 1', PartsPolicy(1, 1)), ('재고 없음', PartsPolicy(0, 0))]:
+            cfg = replace(CFG, costs=costs, parts=parts)
+            res = {p: simulate(pts, prob, m1['th'], curves['개선 1 (1시간)'], cfg, policy=p)['summary'] for p in POLICIES}
+            for p, r in res.items():
+                rows[(sname, r['정책'])] = {'비용': r['비용'], '고장': r['고장'], '긴급 조달': r['긴급 조달'],
+                                            '긴급 조달 비용': r['긴급 조달 비용'], '계획 밖 정지(h)': r['계획 밖 정지(h)']}
+        print(f'\n{label} · {cname} (개선 1 모델)')
+        print(pd.DataFrame(rows).T.to_string())
+
+print('\n민감도: 긴급 조달 기간 (검증 세트, 만 원, ③ DSS, 재고 기본값과 재고 없음)')
+pts, prob = val_inputs['개선 1 (1시간)']
+rush = {}
+for rush_h in [6, 12, 24]:
+    for sname, base in [('기본 재고', PartsPolicy()), ('재고 없음', PartsPolicy(0, 0))]:
+        cfg = replace(CFG, costs=field_costs(), parts=replace(base, rush_h=rush_h))
+        r = simulate(pts, prob, m1['th'], curves['개선 1 (1시간)'], cfg, policy='dss')['summary']
+        rush[(rush_h, sname)] = {'비용 (만 원)': r['비용'], '고장': r['고장'], '긴급 조달': r['긴급 조달']}
+print(pd.DataFrame(rush).T.rename_axis(['긴급 조달(h)', '재고']).to_string())
+

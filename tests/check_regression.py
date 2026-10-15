@@ -12,7 +12,7 @@
   5. 비용 곡선: 대시보드 비용 계산기가 평가 함수(src/evaluate.py)와 같은 비용을 내는가 (손익분기 0.60)
   6. 안전장치: 모르는 정비 유형, 빠진 특징, 바뀐 모델 파일을 조용히 넘기지 않고 멈추는가
   7. 1시간 정답: make_targets_hourly가 6시간 시점에서 정답 파일 기준(make_targets)과 같은가
-  8. 의사결정 지원(DSS): 모델 파일의 정책 비용(검증 세트 ① 1056 ② 980 ③ 900)과, 정기 교체 직전이면 기다리고 준비가 안 되면 지금 교체하는가
+  8. 의사결정 지원(DSS): 모델 파일의 정책 비용(검증 세트 ① 1056 ② 998 ③ 918, 부품 재고 가정 포함)과, 정기 교체 직전이면 기다리고 준비가 안 되면 지금 교체하는가
   9. 보안 (reports/보안_점검.md): 클라우드용 데이터(app_data)가 서비스 예측과 같고 원자료·모델 객체가 없는가, 바뀐 파일을 막는가,
      비밀번호 확인이 맞는가, 입력 감시 범위가 모델 파일에 있는가
 
@@ -39,7 +39,7 @@ from src.serving import MODEL_PATH, _forest_contributions, _matrix, cost_curve, 
 EXPECTED = {
     'threshold': 0.56, 'caution_threshold': 0.57, 'AP': 0.866, '감지': 14, '고장': 16, '비용 두 부품': 1020,
     'test_points': 5028, 'test_alarms': 554, 'test_alarm_scenarios': 18, 'breakeven_p': 0.60, 'step_h': 1,
-    'dss_cost': {'regular': 1056, 'now': 980, 'dss': 900},
+    'dss_cost': {'regular': 1056, 'now': 998, 'dss': 918},     # 부품 재고 가정 포함 (재고 무제한이면 1056 / 980 / 900)
 }
 
 results = []
@@ -165,10 +165,21 @@ if D:
     check('현장 가정(만 원): 지금 교체 2,588 · 정기 교체 때 추가 220 · 고장 4,716',
           (2 * fc.part + fc.unnecessary + fc.replace_fixed + fc.replace_h * fc.downtime_h, fc.part, fc.failure_loss) == (2588, 220, 4716))
     vf = D.get('validation_field') or {}
-    check('현장 가정 검증 세트 정책 비용 (만 원) ① 75,456 ② 63,780 ③ 54,308',
-          {k: round(v['비용']) for k, v in vf.items()} == {'regular': 75456, 'now': 63780, 'dss': 54308}, str({k: round(v['비용']) for k, v in vf.items()}))
+    check('현장 가정 검증 세트 정책 비용 (만 원) ① 75,456 ② 64,080 ③ 54,608 (부품 재고 가정 포함)',
+          {k: round(v['비용']) for k, v in vf.items()} == {'regular': 75456, 'now': 64080, 'dss': 54608}, str({k: round(v['비용']) for k, v in vf.items()}))
     check('안전 기준을 넘으면 지금 교체 (30시간 기다림)',
           decide({'WAIT_H': 30}, D['curve'], DSSConfig(), 'dss')[0] == 'now')
+    from src.dss import PartsPolicy, options
+    _o_ok = options(np.nan, D['curve'], DSSConfig(), stock={'valve': 2, 'oscillator': 1})[0]
+    _o_no = options(np.nan, D['curve'], DSSConfig(), stock={'valve': 2, 'oscillator': 0})[0]
+    check('재고가 없으면 긴급 조달: 시작이 12시간 늦어지고 웃돈(부품값 50%)이 붙는다',
+          _o_no['정비 완료까지(h)'] - _o_ok['정비 완료까지(h)'] == 12 and _o_no['정비 비용'] - _o_ok['정비 비용'] == 6)
+    check('정기 교체 때 함께: 다른 부품 재고가 없고 정기 교체가 긴급 조달보다 이르면 고를 수 없다',
+          len(options(3, D['curve'], DSSConfig(), stock={'valve': 0, 'oscillator': 0}, plan_part='oscillator')) == 1
+          and len(options(3, D['curve'], DSSConfig(), stock={'valve': 1, 'oscillator': 0}, plan_part='oscillator')) == 2)
+    check('부품 조달 기본값: 밸브 2 · 진동장치 1, 정상 72시간, 긴급 12시간 +50%',
+          (PartsPolicy().stock(), PartsPolicy().lead_h, PartsPolicy().rush_h, PartsPolicy().rush_markup)
+          == ({'valve': 2, 'oscillator': 1}, 72.0, 12.0, 0.5))
 
 print('\n9. 보안')
 import json
@@ -283,6 +294,12 @@ check('그래프: 승인이 정비 결정과 추천 선택지에 이어지고 �
       and any(k == '원인 부품' and '점검 후 한 부품' in v for k, v in _tr2), ontology.check(_g2))
 _g2.add((ontology.CC['action_S0248_1'], ontology.CC.judgedPart, ontology.CC['part_S0222_valve']))
 check('다른 설비의 부품을 가리키는 점검 결과는 점검에서 잡는다', any('그 설비의 부품이 아니다' in b for b in ontology.check(_g2)))
+
+print('\n12. 한계와 대응 (강사 피드백)')
+from src.limitations import LIMITS, markdown as _lim_md
+_rep = (ROOT / 'reports' / '연주_조기경보_결과보고서.md').read_text(encoding='utf-8')
+check('결과보고서 12-1절 표가 src/limitations.py와 같다 (대시보드와 같은 목록)', _lim_md() in _rep)
+check('한계마다 지금 대응과 추가 대응이 있다', all(r['지금 대응'] and r['추가 대응'] and r['중요도'] in ('높음', '중간', '낮음') for r in LIMITS))
 
 n_fail = sum(not ok for _, ok in results)
 print(f'\n결과: {len(results) - n_fail}/{len(results)}개 통과')

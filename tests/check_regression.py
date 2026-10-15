@@ -347,6 +347,8 @@ _lg = _ac.ActionLog(None)
 _lg.record('점검 결과', 'test', 'S0294', 70, '현장 작업', judged='valve', confirmed='valve')
 _lg.record('점검 결과', 'test', 'S0294', 70, '정비 책임자', judged='valve', confirmed='oscillator', note='완료 보고 수정')
 check('완료 보고를 고치면 점검 되먹임은 마지막 보고만 센다', _lg.inspection_accuracy() == (1, 0.0))
+_lg.record('점검 결과', 'test', 'S0294', 70, '정비 책임자', judged='구분 못함', confirmed='아직 모름', note='완료 되돌림')
+check('완료를 되돌리면 그때의 점검 결과는 되먹임에서 빠진다', _lg.inspection_accuracy() == (0, None))
 check('작업 지시 SQLite 파일은 커밋되지 않는다 (actions/ 무시)',
       __import__('subprocess').run(['git', 'check-ignore', '-q', 'actions/tasks.sqlite3'], cwd=ROOT).returncode == 0)
 

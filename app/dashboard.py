@@ -636,7 +636,7 @@ def assign_box(sid, srow, sstage, job_, dec_i, W, cfg, load):
             d1, d2 = st.columns(2)
             prio_f = d1.selectbox('우선순위', tasks.PRIORITIES, index=0 if urgent else ({'경보': 1, '주의': 1}.get(sstage, 2)))
             due_f = d2.number_input('시작 예정 (h)', 0.0, 240.0,
-                                    float(now + max(0.0, dec_i.loc[sid, '_start'])) if alarm else float(now), 1.0, format='%.0f')
+                                    min(240.0, float(now + max(0.0, dec_i.loc[sid, '_start']))) if alarm else float(now), 1.0, format='%.0f')
             guide_f = st.text_area('점검 가이드', value=tasks.DEFAULT_GUIDE, height=140, max_chars=tasks.LIMITS['guide'])
             reason_f = st.text_area('추천 이유', max_chars=tasks.LIMITS['reason'],
                                     value=f'{sid} · {srow["상태"]} · 추천 {rec}' + (f' · 24시간 안 고장 확률 {srow["위험 확률"]:.2f}'
@@ -937,13 +937,16 @@ else:
                 if all(o['선택지'].startswith('지금') for o in e['opts']):
                     loose = replace(cfg, max_wait_h=1e9, prep_h=0.0, crew_wait_h=0.0)
                     has_plan = pd.notna(e['wait_h'])
-                    for d_ in ((None,) if has_plan else (PLAN_GUESS_H, 2 * PLAN_GUESS_H)):
-                        po_ = [o for o in options(e['wait_h'], W['curve'], loose, e['elapsed'], delay_h=d_, stock=W['stock'][sid],
-                                                  plan_part=e['plan_part']) if not o['선택지'].startswith('지금')]
+                    # 정기 교체가 있으면 그것으로, 없거나 (부품이 모자라) 계산이 안 되면 N시간 뒤 정지를 가정한다
+                    for d_ in ((None,) if has_plan else ()) + (PLAN_GUESS_H, 2 * PLAN_GUESS_H):
+                        po_ = [o for o in options(e['wait_h'] if d_ is None else np.nan, W['curve'], loose, e['elapsed'], delay_h=d_,
+                                                  stock=W['stock'][sid], plan_part=e['plan_part']) if not o['선택지'].startswith('지금')]
                         if po_:
                             items.insert(1, (f'계획 정비 · {po_[0]["선택지"]} (비교만)', po_[0]['기대 총비용'], CAUTION_YELLOW, False))
                             plan_note = (f'계획 정비는 다음 정기 교체({e["wait_h"]:.0f}시간 뒤)가 최대 대기·부품·정비팀 조건 밖이라 추천 대상에서 뺐습니다. '
-                                         if has_plan else f'정기 교체 계획이 없어 계획 정비는 {d_}시간 뒤 정지를 가정해 비교만 합니다. ')
+                                         if d_ is None else
+                                         (f'다음 정기 교체({e["wait_h"]:.0f}시간 뒤)에는 부품을 맞출 수 없어' if has_plan else '정기 교체 계획이 없어')
+                                         + f' 계획 정비는 {d_}시간 뒤 정지를 가정해 비교만 합니다. ')
                             if po_[0]['고장 확률'] > cfg.safety_max:
                                 plan_note += f'그때까지 고장 확률 {po_[0]["고장 확률"]:.2f}로 안전 기준을 넘습니다. '
                             break
@@ -1014,7 +1017,7 @@ else:
                     with st.form(f'edit_task_{tid}', border=False):
                         e_team = st.selectbox('담당 팀', list(tasks.TEAMS), index=list(tasks.TEAMS).index(cur['team']))
                         e_prio = st.selectbox('우선순위', tasks.PRIORITIES, index=tasks.PRIORITIES.index(cur['priority']))
-                        e_due = st.number_input('시작 예정 (h)', 0.0, 240.0, float(cur['due_h']), 1.0, format='%.0f')
+                        e_due = st.number_input('시작 예정 (h)', 0.0, 240.0, min(240.0, float(cur['due_h'])), 1.0, format='%.0f')
                         e_guide = st.text_area('점검 가이드', value=cur['guide'], max_chars=tasks.LIMITS['guide'])
                         e_reason = st.text_area('추천 이유', value=cur['reason'], max_chars=tasks.LIMITS['reason'])
                         if e_state == '완료':
@@ -1037,6 +1040,9 @@ else:
                                         LOG.record('점검 결과', split, cur['sid'], now, MANAGER, judged=e_jud, confirmed=e_con, note=e_out)
                                     else:
                                         TASKS.set_status(tid, e_state, now)
+                                        if done_:   # 되돌린 완료의 점검 결과는 같은 시각에 '아직 모름'으로 덮는다 (되먹임은 마지막 기록만 센다)
+                                            LOG.record('점검 결과', split, cur['sid'], float(cur['completed_h']), MANAGER, judged='구분 못함',
+                                                       confirmed='아직 모름', note=f'완료 되돌림 #{tid}')
                                         LOG.record('작업 시작' if e_state == '진행 중' else '승인', split, cur['sid'], now, MANAGER,
                                                    note=f'상태 변경 #{tid}: {cur["상태"]} → {e_state}')
                                 elif done_:

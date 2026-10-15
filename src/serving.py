@@ -218,22 +218,32 @@ def failure_hours(scenario_ids):
     return m[['SCENARIO_ID', 'PART_CD', '종류', 'START_H', 'END_H', 'FAIL_H']].reset_index(drop=True)
 
 
-def cost_curve(n_det, n_miss, n_needed, n_false, p_grid=np.linspace(0.5, 1.0, 51)):
+def cost_curve(n_det, n_miss, n_needed, n_false, p_grid=np.linspace(0.5, 1.0, 51), costs=None):
     """부품을 맞힐 확률 p에 따른 비용 (평가 함수 src/evaluate.py와 같은 비용 규칙·상수).
 
     한 부품만 교체: 맞히면 교체 20, 틀리면 교체 20 + 불필요 정비 8 + 고장 66 = 94
     두 부품 모두 교체: 고장 전 40, 오경보 48 (p와 상관없음)
+    costs (src.dss.Costs)를 주면 같은 식을 그 비용 가정으로 계산한다 (대시보드 현장 가정, 만 원).
+    기본 Costs()로 계산하면 위 데이터셋 상수와 같다.
     """
-    hit, both = PART_RULES['맞힘'], PART_RULES['두 부품']
-    wrong_prevent = COST_REPLACE + COST_UNNECESSARY + COST_FAILURE        # 94: 틀린 부품 교체 후 고장
-    wrong_needed = COST_REPLACE + COST_UNNECESSARY                        # 28: 필요한 교체인데 틀린 부품
+    if costs is None:
+        hit, both = PART_RULES['맞힘'], PART_RULES['두 부품']
+        rep, unn, fail = COST_REPLACE, COST_UNNECESSARY, COST_FAILURE
+    else:
+        rep = costs.part + costs.replace_fixed + costs.replace_h * costs.downtime_h      # 한 부품 교체 (정지 포함)
+        unn, fail = costs.unnecessary, costs.failure_loss
+        two = 2 * costs.part + unn + costs.replace_fixed + costs.replace_h * costs.downtime_h
+        hit = {'prevent': rep, 'needed': rep, 'false': rep + unn}
+        both = {'prevent': two, 'needed': two, 'false': two + unn}
+    wrong_prevent = rep + unn + fail        # 94: 틀린 부품 교체 후 고장
+    wrong_needed = rep + unn                # 28: 필요한 교체인데 틀린 부품
     rows = []
     for p in p_grid:
-        one = (n_det * (hit['prevent'] * p + wrong_prevent * (1 - p)) + n_miss * COST_FAILURE
+        one = (n_det * (hit['prevent'] * p + wrong_prevent * (1 - p)) + n_miss * fail
                + n_needed * (hit['needed'] * p + wrong_needed * (1 - p)) + n_false * hit['false'])
         rows.append({'p': p, '한 부품만 교체': one})
     out = pd.DataFrame(rows)
-    out['두 부품 모두 교체'] = (n_det * both['prevent'] + n_miss * COST_FAILURE
+    out['두 부품 모두 교체'] = (n_det * both['prevent'] + n_miss * fail
                            + n_needed * both['needed'] + n_false * both['false'])
-    out['아무것도 안 함'] = (n_det + n_miss) * COST_FAILURE
+    out['아무것도 안 함'] = (n_det + n_miss) * fail
     return out

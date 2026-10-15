@@ -172,12 +172,11 @@ else:
 MNT_START = last_mnt_start.to_dict()
 
 
-@st.cache_data
 def part_breakeven():
-    """원인 부품을 맞힐 확률이 이 값 이상이면 한 부품만 교체하는 쪽이 싸다 (비용 계산기와 같은 계산)"""
+    """원인 부품을 맞힐 확률이 이 값 이상이면 한 부품만 교체하는 쪽이 싸다 (비용 계산기와 같은 계산, 같은 만 원 가정값)"""
     v = bundle['validation']['event']
     cc = cost_curve(n_det=v['감지'], n_miss=v['놓침'], n_needed=v['고장과 무관한 경보 묶음: 필요한 교체'],
-                    n_false=v['고장과 무관한 경보 묶음: 오경보'])
+                    n_false=v['고장과 무관한 경보 묶음: 오경보'], costs=make_cfg(assumptions())[0])
     even = cc.loc[cc['한 부품만 교체'] <= cc['두 부품 모두 교체'].iloc[0], 'p']
     return float(even.iloc[0]) if len(even) else None
 
@@ -258,13 +257,14 @@ def assumptions():
                'n_crews': 2, 'crew_day_h': 8, 'down_h': float(bc.downtime_h), 'penalty': float(bc.failure_penalty),
                'p_other': float(base.p_other_needed), 'max_wait': int(base.max_wait_h), 'delay_h': 0,
                'delay_rate': float(bc.downtime_h),
-               # 비용 기준: 데이터셋 점수 / 현장 가정(만 원, 정건우 현장 경험 2026-10-15)
-               'mode': COST_MODES[0], 'f_cons': 100.0, 'f_part': 200.0, 'f_labor_part': 20.0, 'f_labor_ph': 3.0,
+               # 비용 기준: 서비스 화면은 현장 가정(만 원, 정건우 현장 경험 2026-10-15) 하나로 통일 (2026-10-15 사용자 요청).
+               #   데이터셋 점수(과제 공통 비용 규칙)는 모델 평가용이라 결과보고서·발표에만 쓴다
+               'mode': COST_MODES[1], 'f_cons': 100.0, 'f_part': 200.0, 'f_labor_part': 20.0, 'f_labor_ph': 3.0,
                'f_crew': 4, 'f_down': 500.0, 'f_fail': 300.0, 'f_delay_rate': 500.0,
                # 부품 조달 (데이터에 없어 미리 정한 가정값, 정건우 현장 경험 2026-10-15)
                'stock_v': int(bp.stock_valve), 'stock_o': int(bp.stock_oscillator), 'lead': float(bp.lead_h),
                'rush_h': float(bp.rush_h), 'rush_mk': float(bp.rush_markup)}
-    return {**default, **st.session_state.get('assume', {})}
+    return {**default, **st.session_state.get('assume', {}), 'mode': COST_MODES[1]}
 
 
 COST_MODES = ['데이터셋 점수', '현장 가정 (만 원)']
@@ -442,11 +442,8 @@ def go_detail(sid):
         st.session_state['mtab'] = '설비 상세'
 
 
-def pick_sid(table_key, ids):
-    """설비관리자 ① 대상 목록에서 고른 설비를 오른쪽 비용 비교와 ② 작업 지시, 아래 '설비 상세' 탭에 쓴다"""
-    rows = st.session_state[table_key].selection.rows
-    if rows:
-        st.session_state['decision_sid'] = st.session_state['sid'] = ids[rows[0]]
+PLAN_GUESS_H = 12   # 정기 교체 계획이 없을 때 비용 비교에만 쓰는 '계획 정비' 시점 (가정값, 추천에는 안 씀)
+STAGE_DOT = {'경보': 'red', '주의': 'orange', '정상': 'green', '정비 중': 'gray', '정비 후 예측 대기': 'gray'}   # 설비 목록 상태 점 색
 
 
 def act(kind, sid, role_, note_key=None, **kw):
@@ -720,7 +717,7 @@ else:
             with st.container(horizontal=True, vertical_alignment='bottom'):
                 team_c = st.selectbox('담당 팀', list(tasks.TEAMS), index=list(tasks.TEAMS).index(best_team), key=f'cta_team_{fsid}',
                                       format_func=lambda k: f'{k} · {load[k]}건')
-                due_c = st.number_input('시작 예정 (h)', 0.0, 240.0, due0, 1.0, key=f'cta_due_{fsid}')
+                due_c = st.number_input('시작 예정 (h)', 0.0, 240.0, due0, 1.0, format='%.0f', key=f'cta_due_{fsid}')
                 st.button('배정', icon=':material/assignment_ind:', type='primary', key='cta_assign', on_click=assign_task,
                           args=(fsid, f'{fsid} {fb_["선택지"]}', team_c, '긴급' if urgent else '높음', due_c, tasks.DEFAULT_GUIDE,
                                 f'추천: {fb_["선택지"]} · 완료 전 고장 확률 {fb_["고장 확률"]:.2f} · {r["다음 정기 교체"]}', fb_['선택지']))
@@ -742,45 +739,94 @@ else:
     st.markdown('#### ① 대상과 비용')
     left, right = st.columns([1, 1.15], gap='medium')
     with left:
-        filt = st.segmented_control('대상', ['경보·주의', '경보', '주의', '정상', '전체'], default='경보·주의', key='stage_filter',
-                                    label_visibility='collapsed')
-        kw = st.text_input('설비 검색', placeholder='예: S0294', key='scenario_search', label_visibility='collapsed')
+        filt = st.segmented_control('대상 필터', ['경보·주의', '경보', '주의', '정상', '전체'], default='경보·주의', key='stage_filter',
+                                    required=True)
+        kw = st.text_input('설비 검색', placeholder='예: S0294', key='scenario_search')
         short = t['상태'].str.split(' (', regex=False).str[0]
         keep = {'경보·주의': ['경보', '주의'], '경보': ['경보'], '주의': ['주의'], '정상': ['정상']}.get(filt)
         vis = t[short.isin(keep)] if keep else t
         if kw.strip():
             vis = vis[vis.index.str.contains(kw.strip(), case=False, regex=False)]
-        tv = pd.DataFrame({'설비': vis.index, '상태': short.reindex(vis.index).values, '위험 확률': vis['위험 확률'].values,
-                           '작업': [('작업 있음' if x in busy else js.get(x, '')) for x in vis.index]})
-        ids_ = tv['설비'].tolist()
+        ids_ = vis.index.tolist()
         if st.session_state.get('decision_sid') not in t.index:
             st.session_state['decision_sid'] = ids_[0] if ids_ else t.index[0]
-        tkey = f'tbl_pick_{filt}_{kw.strip()}'       # 필터·검색이 바뀌면 표 선택을 새로 (예전 줄 번호가 다른 설비를 가리키지 않게)
-        st.dataframe(tv, hide_index=True, height=320, key=tkey, on_select=lambda: pick_sid(tkey, ids_),
-                     selection_mode='single-row',
-                     column_config={'위험 확률': st.column_config.ProgressColumn(min_value=0, max_value=1, format='%.2f')})
-        st.caption(f'{len(tv)}대 · 위험한 순서 · 줄을 누르면 오른쪽과 ② 작업 지시가 그 설비로 바뀝니다')
+        st.caption(f'{len(ids_)}대 · 위험한 순서 · 누르면 오른쪽 비용 비교와 ② 작업 지시가 그 설비로 바뀝니다')
+        # 설비 목록: 버튼 한 줄 = 설비 하나 (상태 색 점 · 상태 · 위험 확률 · 진행 중인 작업). 고른 설비는 주 버튼 색
+        with st.container(height=360, border=True):
+            if not ids_:
+                st.caption('조건에 맞는 설비가 없습니다.')
+            for x in ids_:
+                stg = short[x]
+                p_ = vis.loc[x, '위험 확률']
+                job = '작업 있음' if x in busy else js.get(x, '')
+                label = ' · '.join(v for v in [f':{STAGE_DOT.get(stg, "gray")}[●] {x}', stg,
+                                               f'{p_:.0%}' if pd.notna(p_) else '', job] if v)
+                st.button(label, key=f'pick_{x}', width='stretch',
+                          type='primary' if x == st.session_state['decision_sid'] else 'secondary',
+                          on_click=lambda s=x: st.session_state.update({'decision_sid': s, 'sid': s}))
     sid = st.session_state['decision_sid']
     srow = t.loc[sid]
     sstage = srow['상태'].split(' (')[0]
+    with left:
+        st.caption(f'선택: {sid} · {sstage} · {now}h')
     with right:
-        st.markdown(f'**{sid}** · {srow["상태"]}' + (f' · 24시간 안 고장 확률 {srow["위험 확률"]:.2f}' if pd.notna(srow['위험 확률']) else ''))
+        st.markdown(f'##### {sid} · 정비 비용 비교')
+        st.caption(f'상태: {sstage}' + (f' · 24시간 고장 위험 {srow["위험 확률"]:.1%}' if pd.notna(srow['위험 확률']) else ''))
+        # 이미 손댄 설비는 먼저 그 사실을 보여 준다 (재생 데이터에는 우리 교체가 반영되지 않아 경보가 그대로 남기 때문)
+        job_ = '작업 있음' if sid in busy else js.get(sid)
+        JOB_NOTE = {'작업 완료': '작업 완료 · 재가동 뒤 새 예측이 나올 때까지 경보 표시가 남습니다',
+                    '작업 있음': '작업이 이미 배정돼 있습니다 · 아래 ③ 진행 현황에서 확인',
+                    '작업 시작': '작업 진행 중', '보류': '보류한 설비 · 다시 판단하려면 ② 작업 지시', '승인': '승인됨 · 작업 배정 전'}
+        if job_ in JOB_NOTE:
+            st.markdown(f':green-badge[:material/task_alt: {JOB_NOTE[job_]}]' if job_ == '작업 완료'
+                        else f':blue-badge[:material/info: {JOB_NOTE[job_]}]')
         if sid in dec_i.index:
-            e = dec_i.loc[sid, '_e']
+            r_ = dec_i.loc[sid]
+            e = r_['_e']
             b = e['best']
             p24 = fail_prob(W['curve'], e['elapsed'], 24)
-            items = [(o['선택지'], o['기대 총비용'], LINE_BLUE if o is b else OK_GRAY, o is b) for o in e['opts']]
-            items.append(('조치 안 함 (24시간)', p24 * costs.failure_loss, ALARM_RED, False))
+            OPT_COLOR = lambda name: LINE_BLUE if name.startswith('지금') else CAUTION_YELLOW
+            items = [(o['선택지'], o['기대 총비용'], OPT_COLOR(o['선택지']), o is b) for o in e['opts']]
+            # 계획 정비 막대는 늘 보여 준다: 엔진 조건(최대 대기·부품·정비팀) 밖이거나 정기 교체 계획이 없으면 비교용으로만 계산
+            plan_note = ''
+            if all(o['선택지'].startswith('지금') for o in e['opts']):
+                loose = replace(cfg, max_wait_h=1e9, prep_h=0.0, crew_wait_h=0.0)
+                has_plan = pd.notna(e['wait_h'])
+                for d_ in ((None,) if has_plan else (PLAN_GUESS_H, 2 * PLAN_GUESS_H)):
+                    po_ = [o for o in options(e['wait_h'], W['curve'], loose, e['elapsed'], delay_h=d_, stock=W['stock'][sid],
+                                              plan_part=e['plan_part']) if not o['선택지'].startswith('지금')]
+                    if po_:
+                        items.insert(1, (f'계획 정비 · {po_[0]["선택지"]} (비교만)', po_[0]['기대 총비용'], CAUTION_YELLOW, False))
+                        plan_note = (f'계획 정비는 다음 정기 교체({e["wait_h"]:.0f}시간 뒤)가 최대 대기·부품·정비팀 조건 밖이라 추천 대상에서 뺐습니다. '
+                                     if has_plan else f'정기 교체 계획이 없어 계획 정비는 {d_}시간 뒤 정지를 가정해 비교만 합니다. ')
+                        if po_[0]['고장 확률'] > cfg.safety_max:
+                            plan_note += f'그때까지 고장 확률 {po_[0]["고장 확률"]:.2f}로 안전 기준을 넘습니다. '
+                        break
+            items.append(('24시간 조치 안 함', p24 * costs.failure_loss, ALARM_RED, False))
             cost_bars(items, costs)
-            st.caption((f'즉시 조치: {e["urgent"]} · ' if e['urgent'] else '')
-                       + f'추천은 안전 기준({cfg.safety_max:.2f})을 지키는 선택지 중 기대 총비용이 가장 낮은 것입니다.')
+            start_h = now + max(0.0, r_['_start'])
+            todo = ('재가동 뒤 새 예측 확인' if job_ == '작업 완료' else
+                    f'{r_["다음 정기 교체"]} 두 부품 함께 교체 · 그때까지 추이 관찰' if b['선택지'].startswith('다음 정기') else
+                    f'② 작업 지시로 배정 · {start_h:.0f}시간 교체 시작 예정'
+                    + (f' (정비팀 차례 대기 {r_["_slot"]:.0f}시간)' if r_['_slot'] else ''))
+            if e['urgent'] and job_ != '작업 완료':
+                st.markdown(':red-badge[:material/emergency: 즉시 조치: 지금 해도 안전 기준 초과]')
+            st.info(f'**추천:** {b["선택지"]} | **다음 할 일:** {todo}')
+            st.caption(f'추천 = 완료 전 고장 확률이 안전 기준({cfg.safety_max:.2f}) 이하인 선택지 중 기대 총비용이 가장 낮은 것. '
+                       + ('어떤 선택지도 안전 기준을 못 지켜 가장 빨리 할 수 있는 조치를 권합니다. ' if e['urgent'] else '')
+                       + plan_note + '최소 비용과 실제 권장 조치는 다를 수 있습니다. 안전·현장 절차 우선.')
+            with st.expander('이 설비 비용 가정', icon=':material/tune:'):
+                st.markdown(f'- 지금 두 부품 교체 비용: **{fmt_cost(e["opts"][0]["정비 비용"], costs)}** (교체 {costs.replace_h:.0f}시간)\n'
+                            f'- 계획 밖 정지 1시간 생산 차질: **{fmt_cost(costs.downtime_h, costs)}**\n'
+                            f'- 고장 시 손실: **{fmt_cost(costs.failure_loss, costs)}**\n'
+                            f'- 안전 기준(완료 전 고장 확률): **{cfg.safety_max:.2f}** · 다음 정기 교체: **{r_["다음 정기 교체"]}**\n'
+                            f'- 예비 재고: **{stock_text(W["stock"][sid])}** · 첫 경보 뒤 **{e["elapsed"]:.0f}시간** 지남')
+                st.caption('가정값은 아래 ④ 자세히 → "정책·비용"에서 바꿉니다. 바꾸면 모든 설비에 같이 적용됩니다.')
             with st.expander('비용 계산 근거', icon=':material/calculate:'):
-                st.markdown('기대 총비용 = (1 − P) × (정비 비용 + 생산 차질) + P × 고장 시 손실 '
-                            f'(고장 시 손실 {fmt_cost(costs.failure_loss, costs)})  \n'
-                            + '  \n'.join(f'- **{o["선택지"]}**: P {o["고장 확률"]:.2f} · {o["근거"]}' for o in e['opts'])
-                            + f'  \n- **조치 안 함**: 앞으로 24시간 안 고장 확률 {p24:.2f} × 고장 시 손실'
-                            + f'  \n- P는 학습 세트에서 경보 뒤 실제 고장까지 걸린 시간 분포(경보 뒤 {e["elapsed"]:.0f}시간 동안 고장 없음 조건). '
-                              '비용 기준·가정값은 아래 "정책·비용" 탭에서 바꿉니다.')
+                st.markdown('  \n'.join(f'- **{o["선택지"]}**: 고장 확률 P {o["고장 확률"]:.2f} · {o["근거"]}' for o in e['opts'])
+                            + f'  \n- **24시간 조치 안 함**: 앞으로 24시간 안 고장 확률 {p24:.2f} × 고장 시 손실'
+                            + f'  \n- P는 학습 세트에서 경보 뒤 실제 고장까지 걸린 시간 분포(경보 뒤 {e["elapsed"]:.0f}시간 동안 고장 없음 조건).')
+            st.caption('기대 총비용 = (1 − P) × (정비 비용 + 생산 차질) + P × 고장 시 손실 · P = 정비를 마치기 전에 고장 날 확률')
         elif sstage == '주의':
             pr = procurement(cfg, W['stock'], [sid]).iloc[0]
             st.info(f'**주의: 점검·부품 준비** · 열화가 시작됐지만 24시간 안 고장 위험은 낮습니다. 장비를 점검하고, 설비가 돌면 다음 정비 때 함께 '
@@ -807,7 +853,7 @@ else:
         prio_f = c3.selectbox('우선순위', tasks.PRIORITIES, index={'경보': 0 if sid in dec_i.index and dec_i.loc[sid, '제약'].startswith('즉시') else 1,
                                                                  '주의': 1}.get(sstage, 2))
         due_f = c4.number_input('시작 예정 (h)', 0.0, 240.0,
-                                float(now + max(0.0, dec_i.loc[sid, '_start'])) if sid in dec_i.index else float(now), 1.0)
+                                float(now + max(0.0, dec_i.loc[sid, '_start'])) if sid in dec_i.index else float(now), 1.0, format='%.0f')
         with st.expander('점검 가이드 · 추천 이유'):
             guide_f = st.text_area('점검 가이드', value=tasks.DEFAULT_GUIDE, height=140, max_chars=tasks.LIMITS['guide'])
             reason_f = st.text_area('추천 이유', max_chars=tasks.LIMITS['reason'],
@@ -1001,13 +1047,12 @@ if page == '설비 상세':
 
 elif page == '의사결정':
     D = bundle.get('dss')
-    st.subheader('정책·비용: 시스템 효과, 가정값, 전체 정비 결정과 근거', icon=ICONS['정책·비용'])
+    st.subheader('정책·비용: 가정값, 전체 정비 결정과 근거', icon=ICONS['정책·비용'])
     if not D:
         st.warning('이 모델 파일에는 의사결정 정보가 없습니다. 터미널에서 `python analysis/05_predict_test.py`로 다시 만드세요.')
         st.stop()
     A = assumptions()
-    A['mode'] = st.segmented_control('비용 기준', COST_MODES, default=A['mode'], required=True,
-                         help='데이터셋 점수: 과제의 비용 규칙(모든 팀 공통). 현장 가정: 소모품·중요 부품·공임·인력·생산 차질·고장 손실을 만 원으로 넣은 값(정건우 현장 경험)')
+    st.caption('비용 단위: 만 원 (현장 가정값, 아래 "가정값"에서 바꿀 수 있음). 과제 공통 비용 규칙(점수)으로 낸 모델 평가는 결과보고서에 있습니다.')
     FIELD = A['mode'] == COST_MODES[1]
     U = '만 원' if FIELD else '점'
 
@@ -1155,29 +1200,6 @@ elif page == '의사결정':
             st.altair_chart(alt.layer(*marks).properties(height=240), width='stretch')
             st.caption('파란 선: 지금부터 h시간 안에 고장 날 확률 · 초록 점: 선택지별 정비 완료 시점 · 빨간 점선: 안전 기준')
 
-    # ① 시스템 효과: 없었다면 → 있으면 (검증 세트 시뮬레이션)
-    sim = D.get('validation_field') if FIELD else D.get('validation')
-    if FIELD and not sim:
-        st.info('이 모델 파일에는 현장 가정 시뮬레이션이 없습니다. python analysis/05_predict_test.py 로 다시 만드세요.')
-    if sim:
-        st.subheader('이 시스템이 없었다면 → 있으면', icon=':material/compare_arrows:')
-        st.caption('검증 세트 72대 시뮬레이션')
-        r1, r2, r3 = sim['regular'], sim['now'], sim['dss']
-        k1, k2, k3 = st.columns(3, border=True)
-        k1.metric('① 시스템 없음: 정기 교체만', won(r1['비용']), f'고장 {r1["고장"]}건', delta_color='off')
-        k2.metric('② 경보만: 켜지면 즉시 교체', won(r2['비용']), f'{won(r2["비용"] - r1["비용"])} · 고장 {r2["고장"]}건',
-                  delta_color='inverse')
-        k3.metric('③ 경보 + 의사결정 지원', won(r3['비용']), f'{won(r3["비용"] - r1["비용"])} · 고장 {r3["고장"]}건',
-                  delta_color='inverse')
-        st.caption(f'정비 관리자가 예측 없이 정기 교체만 하면 고장 {r1["고장"]}건이 그대로 일어납니다. 경보를 따라 바로 교체하면 고장이 '
-                   f'{r2["고장"]}건으로 줄지만, 정기 교체 직전의 경보까지 따로 교체해 정비가 {r2["정비 횟수"]}번 듭니다. '
-                   f'의사결정 지원은 그중 {r3["정기 교체 때"]}건을 정기 교체 때 함께 처리해 계획 밖 정지를 '
-                   f'{r2["계획 밖 정지(h)"]:.0f} → {r3["계획 밖 정지(h)"]:.0f}시간으로 줄입니다. '
-                   f'**시뮬레이션에 따른 예상 절감액: {won(r1["비용"] - r3["비용"])} ({(r1["비용"] - r3["비용"]) / r1["비용"]:.0%}, ① 대비)**. '
-                   + ('현장 가정(만 원, 기본 가정값)으로 계산한 값으로 실제 운영 결과가 아닙니다. ' if FIELD else
-                      '점수는 데이터셋 비용 규칙이며 실제 돈이 아닙니다. ')
-                   + '정답을 알 수 없는 관측 끝부분의 경보는 빠져 있습니다(analysis/10_dss_policy.py).')
-
     # ⑤ 조치 기록과 점검 되먹임
     with st.expander('조치 기록과 점검 되먹임', icon=':material/history:'):
         fb = feedback()
@@ -1225,7 +1247,8 @@ elif page == '의사결정':
         st.caption(f'발주 시점: 주의 단계에서 두 부품 교체에 모자라는 재고가 있을 때(정상 조달 {cfg.parts.lead_h:.0f}시간). '
                    f'경보 때 재고가 없으면 긴급 조달({cfg.parts.rush_h:.0f}시간, 웃돈 {cfg.parts.rush_markup:.0%})로 교체가 늦어집니다.')
 
-    # ⑦ 정책 시뮬레이션 상세
+    # ⑦ 정책 시뮬레이션 상세 (요약 카드 '없었다면 → 있으면'은 2026-10-15 사용자 요청으로 뺐다)
+    sim = D.get('validation_field') if FIELD else D.get('validation')
     if sim:
         with st.expander('정책 시뮬레이션 상세 (검증 세트, 기본 가정값)'):
             sv = pd.DataFrame(list(sim.values())).set_index('정책')
@@ -1334,33 +1357,34 @@ elif page == '비용 계산기':
     st.caption('원인 부품을 얼마나 맞힐 수 있으면 이득인가')
     st.markdown(
         f'검증 세트 결과(고장 {v["고장"]}건 중 {n["n_det"]}건 감지, 고장과 무관한 교체 {n["n_needed"]}번, '
-        f'진짜 오경보 {n["n_false"]}번)에 데이터셋 비용 규칙을 적용합니다.\n'
+        f'진짜 오경보 {n["n_false"]}번)에 현장 비용 가정(만 원, "정책·비용" 탭의 가정값)을 적용합니다.\n'
         '- 경보가 나면 바로 교체합니다(정책: 경보 즉시 교체). 한 부품만 바꾸는데 틀리면, 불필요 정비가 되고 고장도 못 막습니다.\n'
         '- 정기 교체 직전에 울린 맞는 경보도 교체 한 번으로 셉니다. 예정 교체와 묶어 처리하면 이 비용은 줄어듭니다(의사결정 지원, 다음 단계).\n'
         '- 센서로는 원인 부품을 구분할 수 없어(EDA E9), 부품을 맞힐 확률은 현장 점검 능력에 달려 있습니다.')
     p = st.slider('원인 부품을 맞힐 확률', 0.5, 1.0, 0.5, step=0.01,
                   help='0.5 = 둘 중 하나를 찍음, 1.0 = 항상 맞힘')
-    cc = cost_curve(**n)
+    costs_f, _ = make_cfg(assumptions())
+    cc = cost_curve(**n, costs=costs_f)
     one = float(np.interp(p, cc['p'], cc['한 부품만 교체']))
     both, none = cc['두 부품 모두 교체'].iloc[0], cc['아무것도 안 함'].iloc[0]
     c1, c2, c3 = st.columns(3, border=True)
-    c1.metric('한 부품만 교체', f'{one:.0f}점', f'{one - none:+.0f} (아무것도 안 함 대비)', delta_color='inverse')
-    c2.metric('두 부품 모두 교체', f'{both:.0f}점', f'{both - none:+.0f}', delta_color='inverse')
-    c3.metric('아무것도 안 함', f'{none:.0f}점')
+    c1.metric('한 부품만 교체', fmt_cost(one, costs_f), f'{fmt_cost(one - none, costs_f)} (아무것도 안 함 대비)', delta_color='inverse')
+    c2.metric('두 부품 모두 교체', fmt_cost(both, costs_f), fmt_cost(both - none, costs_f), delta_color='inverse')
+    c3.metric('아무것도 안 함', fmt_cost(none, costs_f))
     u = bundle['validation'].get('unlabeled')
     if u:
-        lo, hi = u['비용 범위']['두 부품']
+        two_ = 2 * costs_f.part + costs_f.unnecessary + costs_f.replace_fixed + costs_f.replace_h * costs_f.downtime_h
         st.warning(
             f'**위 비용은 정답을 알 수 있는 구간만 센 값입니다.** 관측이 끝나 결과를 알 수 없는 시점 {u["시점"]}개에서도 '
             f'경보가 {u["경보 시점"]}번(경보 묶음 {u["경보 묶음"]}개) 울렸고, 실제 운영이라면 교체가 일어납니다. '
-            f'두 부품 교체 기준으로 {lo:.0f}~{hi:.0f}점이 더 들 수 있습니다. 이 경보가 관측 뒤의 고장을 막았는지, '
+            f'두 부품 교체 기준으로 경보 묶음마다 약 {fmt_cost(two_, costs_f)}, 모두 {fmt_cost(u["경보 묶음"] * two_, costs_f)}까지 더 들 수 있습니다. 이 경보가 관측 뒤의 고장을 막았는지, '
             '"아무것도 안 함"에서 관측 뒤에 고장이 났는지는 알 수 없어 운영 비용은 확정할 수 없습니다.')
     even = cc.loc[cc['한 부품만 교체'] <= both, 'p']
     if len(even):
         st.info(f'부품을 맞힐 확률이 **{even.iloc[0]:.2f} 이상**이면 한 부품만 바꾸는 쪽이 두 부품 모두 바꾸는 것보다 쌉니다.')
     long = cc.melt(id_vars='p', var_name='방식', value_name='비용')
     chart = alt.Chart(long).mark_line(strokeWidth=2.5).encode(
-        x=alt.X('p:Q', title='원인 부품을 맞힐 확률'), y=alt.Y('비용:Q', title='비용 (점수, 낮을수록 좋음)'),
+        x=alt.X('p:Q', title='원인 부품을 맞힐 확률'), y=alt.Y('비용:Q', title='비용 (만 원, 낮을수록 좋음)'),
         color=alt.Color('방식:N', scale=alt.Scale(domain=['한 부품만 교체', '두 부품 모두 교체', '아무것도 안 함'],
                                                 range=[LINE_BLUE, LINE_GREEN, OK_GRAY])))
     now_rule = alt.Chart(pd.DataFrame({'p': [p]})).mark_rule(strokeDash=[4, 4]).encode(x='p:Q')

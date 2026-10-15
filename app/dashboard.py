@@ -5,7 +5,7 @@
 
 - 저장된 모델로 예측만 한다(다시 학습하지 않는다). 원자료가 없으면 app_data/의 미리 계산한 결과만 읽는다(클라우드).
 - 오른쪽 위 시연 설정에서 데이터 세트와 '지금 시각'을 고른다. 그 시각까지의 데이터만으로 본 상태를 보여 준다(재생 방식).
-- 2단계 경보(결과보고서 7-5절): 주의 = 열화 감지 → 점검·부품 준비, 경보 = 24시간 안 고장 위험 → 교체
+- 2단계 경보(결과보고서 5절): 주의 = 열화 감지 → 점검·부품 준비, 경보 = 24시간 안 고장 위험 → 교체
 
 화면 (화면마다 맨 위에 '지금 할 일' 하나와 주 버튼 하나: 콜투액션)
   작업자      내 작업    내 팀의 지금 할 일 → 작업 시작 → 완료 보고(결과·수행 내용·어느 부품이었나). 즉시 조치 설비는 배정 전에도 시작
@@ -42,7 +42,7 @@ from src.serving import cost_curve, explain, failure_hours, load_bundle, score_s
 st.set_page_config(page_title='CAST GUARD AI', page_icon=':material/shield:', layout='wide',
                    initial_sidebar_state='collapsed')
 
-# 실행 방식 (reports/보안_점검.md)
+# 실행 방식 (결과보고서 9절·부록 E)
 #   로컬: data/posko/ 원자료와 models/risk24.joblib로 직접 계산한다 (내 컴퓨터 안에서만 열림, 비밀번호 없음)
 #   클라우드: 원자료가 없고 app_data/만 있다. 미리 계산한 결과만 읽고(모델 파일을 불러오지 않음), 비밀번호를 요구한다
 CLOUD = not (ROOT / 'data' / 'posko').exists() and app_data.available()
@@ -55,7 +55,7 @@ SPLITS = {'테스트 (정답 없음)': 'test', '검증 (정답 있음)': 'valida
 ALARM_RED, CAUTION_YELLOW, OK_GRAY, MNT_GRAY = '#FF667A', '#F7B955', '#7D8FA9', '#3A4D66'
 LINE_BLUE, LINE_GREEN, INK = '#60A5FA', '#2DD4A0', '#EDF4FF'
 # 화면에 보여 줄 단계 이름: 정상(NORMAL) → 주의(CAUTION, 열화 감지) → 경보(WARNING, 24시간 고장 위험)
-# 모델 출력(STAGE)은 '경보'/'주의'/'정상' 그대로 두고 화면에서만 이름을 바꾼다 (결과보고서 7-7절 ⑥)
+# 모델 출력(STAGE)은 '경보'/'주의'/'정상' 그대로 두고 화면에서만 이름을 바꾼다 (결과보고서 8-1절)
 LABEL = {'경보': '경보 (WARNING)', '주의': '주의 (CAUTION)', '정상': '정상 (NORMAL)'}
 WARN, CAU, NORM = LABEL['경보'], LABEL['주의'], LABEL['정상']
 STAGE_COLORS = alt.Scale(domain=[WARN, CAU, NORM], range=[ALARM_RED, CAUTION_YELLOW, OK_GRAY])
@@ -1256,7 +1256,7 @@ elif page == '모델 정보':
         f'- **학습**: 학습 세트 216개 시나리오의 예측 시점 {bundle["n_train_points"]:,}개\n'
         f'- **경보 기준**: 24시간 안 고장 확률 ≥ {TH:.2f}. 학습 세트 교차검증에서 '
         '점진 고장을 모두 잡고 진짜 오경보가 0인 값 중 가장 낮은 값(오경보 없이 가장 일찍 경보)\n'
-        '- **검증 세트**: 72개 시나리오, 학습에 쓰지 않고 평가에만 사용(모델·기준 선택은 학습 세트 교차검증. 수정 이력은 결과보고서 2절)')
+        '- **검증 세트**: 72개 시나리오, 학습에 쓰지 않고 평가에만 사용(모델·기준 선택은 학습 세트 교차검증. 수정 이력은 결과보고서 부록 B-7)')
     c1, c2, c3, c4 = st.columns(4, border=True)
     c1.metric('AP (순위 능력)', f'{v["point"]["AP"]:.3f}', help='기준 예제 0.806')
     c2.metric('정밀도 / 재현율', f'{v["point"]["정밀도"]:.2f} / {v["point"]["재현율 (점진 고장만)"]:.2f}',
@@ -1284,7 +1284,7 @@ elif page == '모델 정보':
         d3.metric('경보보다 먼저 (평균)', f'{cv["추가 준비 시간 평균(h)"]:.1f}시간')
         d4.metric('첫 주의 (중앙값)', f'고장 {cv["주의 리드타임 중앙값(h)"]:.0f}시간 전')
         st.caption(f'검증 세트 주의 {cv["주의 묶음"]}번 중 헛걸음 {cv["열화 아닌 설비의 주의"]}번. 대부분은 열화가 시작되기 몇 시간 전이었고, '
-                   '일부는 끝까지 정상인 설비였습니다. 자세한 근거는 reports/연주_조기경보_결과보고서.md 7-5절')
+                   '일부는 끝까지 정상인 설비였습니다. 자세한 근거는 reports/연주_조기경보_결과보고서.md 5절')
 
     st.subheader('검증 세트 고장별 결과', icon=':material/fact_check:')
     ev = v['events'].rename(columns={'SCENARIO_ID': '시나리오', 'TYPE': '고장 종류'})
@@ -1301,7 +1301,7 @@ elif page == '모델 정보':
     st.dataframe(lim[['중요도', '구분', '한계', '영향', '지금 대응', '추가 대응', '근거']], hide_index=True,
                  column_config={c: st.column_config.TextColumn(width='large') for c in ['영향', '지금 대응', '추가 대응']})
     st.caption('돌발 고장·원인 부품·리드타임처럼 모델만으로 풀 수 없는 한계는 운영(정기 교체 유지, 점검 결과 되먹임, 예비 재고와 주의 단계 발주)으로 메웁니다. '
-               '자세한 내용은 결과보고서 12절.')
+               '자세한 내용은 결과보고서 10절.')
 
     st.subheader('온톨로지: 지금 상태를 하나의 그래프로', icon=':material/account_tree:')
     g = ontology_graph(assumptions(), status_table())

@@ -5,7 +5,7 @@
 @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
 
 # 연주 설비 정비 의사결정 지원 온톨로지 (스키마, TBox)
-# 설계: reports/연주_DSS_설계초안.md 6절 (객체·링크·액션). 인스턴스(ABox)는 src/ontology.py가 화면 데이터로 만든다.
+# 설계: 결과보고서 8-2절 (객체·링크·액션, 설계 기록 부록 D-1). 인스턴스(ABox)는 src/ontology.py가 화면 데이터로 만든다.
 # "신호 → 부품" 링크는 일부러 두지 않는다: 센서로는 5초 원자료로도 고장 부품을 구분하지 못했다(결과보고서 부록 A E9).
 
 <https://github.com/choi-doongyi/WannaOne_END/ontology> a owl:Ontology ;

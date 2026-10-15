@@ -206,6 +206,37 @@ check('manifest의 경로 조작 값(../)을 막는다',
       and raises(lambda: _check_manifest({'files': [{'id': 'casting', 'scenarioId': 'S0001',
                                                      'chunks': [{'sha256': '../../etc/passwd'}]}], 'scenarios': []}), ValueError))
 
+print('\n10. 온톨로지 (OWL/RDF)')
+from rdflib import Literal as _Lit
+from src import ontology
+from src.dss import DSSConfig, options, recommend
+_m, _data = app_data.load()
+_pv, _hv, _, _, _mv, _plv = _data['validation']
+_now = 16
+_last = _pv[_pv['T_H'] <= _now].sort_values('T_H').groupby('SCENARIO_ID').tail(1).set_index('SCENARIO_ID')
+_st = pd.DataFrame({'STAGE': np.where(_last['ALARM'], '경보', _last['STAGE']), 'PROB': _last['PROB'],
+                    'DEGRADED_PROB': _last['DEGRADED_PROB'], 'PRED_H': _last['T_H'],
+                    'FIRST_ALARM_H': np.nan, 'FIRST_CAUTION_H': np.nan}, index=_last.index)
+_sg = _hv[_hv['DONE_H'] <= _now].dropna().sort_values('DONE_H').groupby('SCENARIO_ID').tail(1).set_index('SCENARIO_ID')
+_curve = _m['dss']['curve']
+_dec = []
+for _s in _st.index[_st['STAGE'] == '경보']:
+    _nx = _plv[(_plv['SCENARIO_ID'] == _s) & (_plv['PLAN_H'] > _now)]['PLAN_H'].min()
+    _opts = options(_nx - _now, _curve, DSSConfig())
+    _dec.append({'sid': _s, 'rank': None, 'constraint': '', 'best': recommend(_opts)[0]['선택지'], 'options': _opts})
+_g = ontology.build(_now, _st, _sg, _mv[_mv['START_H'] <= _now], _plv, _dec, cost_unit='점', safety_max=0.2, th=0.56, cth=0.57)
+check('스키마(TBox)를 읽고 그래프 규칙 점검을 통과한다', len(ontology.tbox()) > 100 and ontology.check(_g) == [], ontology.check(_g))
+_tr = dict(ontology.trace(_g, 'S0248'))
+check('근거 사슬: S0248(검증, 16h)은 경보 → 예측 → 신호 → 정기 교체 때 함께 교체 추천',
+      '경보 (WARNING)' in _tr.get('경보 단계', '') and '몰드 레벨 진폭' in _tr.get('근거 신호', '')
+      and any(k == '정비 결정' and v.startswith('추천: 다음 정기 교체') for k, v in ontology.trace(_g, 'S0248')))
+check('현장 작업용 근거 사슬에는 비용이 없다', not any('비용' in v for _, v in ontology.trace(_g, 'S0248', with_cost=False)))
+check('경보 설비마다 두 부품이 필요 부품으로 잡힌다',
+      ontology.parts_needed(_g) == {'밸브': len(_dec), '진동장치': len(_dec)}, ontology.parts_needed(_g))
+_g.add((ontology.CC['read_S0248_MLD_AMP'], ontology.CC.replaces, ontology.CC['part_S0248_valve']))
+check('신호 → 부품 링크를 넣으면 점검에서 잡는다', any('신호 → 부품' in b for b in ontology.check(_g)))
+check('IRI에 쓸 수 없는 ID는 막는다', raises(lambda: ontology._sid('S0248> . <x'), ValueError))
+
 n_fail = sum(not ok for _, ok in results)
 print(f'\n결과: {len(results) - n_fail}/{len(results)}개 통과')
 sys.exit(1 if n_fail else 0)

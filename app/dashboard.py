@@ -18,6 +18,9 @@
   3. 의사결정     경보 설비마다 지금 교체 / 정기 교체 때 함께의 기대 비용 비교와 추천 (src/dss.py), 가정값 조정
   4. 모델 정보    경보·주의 모델과 기준, 검증 세트 성능
   5. 비용 계산기  원인 부품을 맞힐 확률에 따른 비용 (팀 결정 C)
+
+온톨로지 (src/ontology.py, OWL/RDF): 지금 시각의 설비·예측·신호·경보·정비 결정·정기 교체 계획을 한 그래프로 잇는다.
+  설비 상세의 '근거 따라가기'와 모델 정보의 그래프 요약·내려받기에 쓴다.
 """
 
 import sys
@@ -33,7 +36,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from src.posko_data import load_scenarios
 from src.dss import fail_prob, field_costs, options, plans, recommend
-from src import app_data
+from src import app_data, ontology
 from src.auth import require_login
 from src.serving import cost_curve, explain, failure_hours, load_bundle, score_scenarios
 
@@ -300,6 +303,24 @@ def risk_word(p, safety):
     if pd.isna(p):
         return '—'
     return '높음' if p > safety else ('보통' if p >= 0.05 else '낮음')
+
+
+def ontology_graph(A, t, with_decisions=True):
+    """지금 시각의 상태를 온톨로지 그래프로 (src/ontology.py). 화면이 이미 계산한 값만 쓴다"""
+    status = pd.DataFrame({
+        'STAGE': t['상태'].str.split(' (', regex=False).str[0], 'PROB': t['위험 확률'],
+        'DEGRADED_PROB': t['열화 확률'] if CAUTION else np.nan, 'PRED_H': t['마지막 예측 (h)'],
+        'FIRST_ALARM_H': t['첫 경보 (h)'], 'FIRST_CAUTION_H': t['첫 주의 (h)'] if CAUTION else np.nan}, index=t.index)
+    cur = after_last_maintenance(hr_now.assign(HOUR_START=hr_now['DONE_H'] - 1), 'HOUR_START')
+    signals = cur.dropna(subset=list(SIGNAL_NAMES)).sort_values('DONE_H').groupby('SCENARIO_ID').tail(1).set_index('SCENARIO_ID')
+    decisions, unit, safety = [], None, None
+    if with_decisions and bundle.get('dss'):
+        W = work_plan(A, t)
+        unit, safety = W['costs'].unit, W['cfg'].safety_max
+        decisions = [{'sid': r['설비 (시나리오)'], 'rank': r['순위'], 'constraint': r['제약'], 'best': r['추천'],
+                      'options': r['_e']['opts']} for _, r in W['dec'].iterrows()]
+    return ontology.build(now, status, signals, mnt_now, get_plans(split), decisions, cost_unit=unit, safety_max=safety,
+                          th=TH, cth=CTH)
 
 
 def open_detail(table_key, ids):
@@ -581,6 +602,14 @@ elif page == '설비 상세':
                            + '네 신호와 결합 점수는 서로 비슷한 정보라 모델 안에서 서로 상쇄될 수 있습니다. '
                            '묶음 하나의 크기보다 왼쪽의 신호 상태를 먼저 보세요.')
 
+    with st.expander('근거 따라가기: 경보 → 예측 → 신호 → 정비 결정 (온톨로지)', icon=':material/account_tree:'):
+        tr = ontology.trace(ontology_graph(assumptions(), t), sid, with_cost=(role == '정비 책임자'))
+        st.dataframe(pd.DataFrame(tr, columns=['단계', '내용']), hide_index=True, width='stretch',
+                     column_config={'내용': st.column_config.TextColumn(width='large')})
+        st.caption('설비·예측·신호·경보·정비 결정·정기 교체 계획을 하나의 그래프(OWL/RDF)로 잇고, 그 링크를 따라 읽은 결과입니다. '
+                   '판단은 그래프가 아니라 경보 기준과 의사결정 규칙이 합니다. 센서로는 원인 부품을 구분할 수 없어 '
+                   '"신호 → 부품" 링크는 두지 않았습니다.')
+
 
 # 3. 의사결정 (DSS)
 
@@ -843,6 +872,27 @@ elif page == '모델 정보':
                  hide_index=True, column_config={'리드타임(h)': st.column_config.NumberColumn(format='%.1f')})
     st.caption('리드타임: 고장 4시간 전까지 난 경보 중 가장 이른 경보부터 고장까지의 시간. '
                '자세한 근거는 reports/연주_조기경보_결과보고서.md 4절과 부록 B')
+
+
+    st.subheader('온톨로지: 지금 상태를 하나의 그래프로', icon=':material/account_tree:')
+    g = ontology_graph(assumptions(), status_table())
+    cnt = ontology.counts(g)
+    bad = ontology.check(g)
+    e1, e2, e3, e4 = st.columns(4, border=True)
+    e1.metric('트리플 수', f'{len(g):,}')
+    e2.metric('설비 / 예측', f'{cnt.get("설비", 0)} / {cnt.get("예측", 0)}')
+    e3.metric('경보 / 주의', f'{cnt.get("경보 (WARNING)", 0)} / {cnt.get("주의 (CAUTION)", 0)}')
+    e4.metric('규칙 점검', '통과' if not bad else f'{len(bad)}건 어김', help='; '.join(bad) or '신호→부품 링크 없음, 주의·경보 겹침 없음, 정비 결정마다 추천 있음')
+    need = ontology.parts_needed(g)
+    st.markdown(
+        '- **스키마**: `ontology/casting_dss.ttl` (OWL). 객체 = 설비·부품·신호·예측·경보 단계·정비 결정·선택지·정비 작업·정기 교체 계획·고장, '
+        '링크 = 가진다·관측한다·근거·요청한다·추천한다·교체한다 등\n'
+        '- **인스턴스**: 이 화면의 지금 시각·데이터 세트·가정값으로 만든다(예측·신호·정비 기록·DSS 결정)\n'
+        f'- **질의 예 (SPARQL)**: 경보 설비가 필요로 하는 부품 = '
+        + (' · '.join(f'{k} {v}개' for k, v in need.items()) if need else '없음'))
+    st.download_button('지금 그래프 내려받기 (Turtle)', g.serialize(format='turtle'), file_name=f'casting_{split}_{now}h.ttl',
+                       mime='text/turtle', icon=':material/download:')
+
 
 
 # 5. 비용 계산기

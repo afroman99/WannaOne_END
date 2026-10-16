@@ -24,13 +24,18 @@ gatherUsageStats = false
 fastReruns = true
 
 [theme]
-# CAST GUARD AI (팀원 설계와 합침, 2026-10-15): 어두운 배경과 팀원 색을 CSS 대신 테마로 지정한다
-#   (CSS로 배경만 바꾸면 버튼·라디오 글자가 배경과 겹쳐 안 보이고, Streamlit 버전이 바뀌면 깨진다)
-base = "dark"
+# 라이트·다크·시스템 설정 따르기: 화면 오른쪽 위 ⋮ → Settings에서 고른다 (기본: 시스템 설정 따르기, 2026-10-16)
+#   공통 글꼴·크기·모서리는 여기에, 색은 [theme.light]·[theme.dark]에 따로 둔다.
+#   (CSS로 배경만 바꾸면 버튼·라디오 글자가 배경과 겹쳐 안 보이고, Streamlit 버전이 바뀌면 깨진다 → 테마 설정으로만)
 font = "'Noto Sans KR':https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap"
 baseFontSize = 17
 headingFontSizes = ["2rem", "1.6rem", "1.3rem"]
 headingFontWeights = [800, 700, 650]
+baseRadius = "0.75rem"
+buttonRadius = "0.6rem"
+showWidgetBorder = true
+
+[theme.dark]
 primaryColor = "#3B82F6"            # 주 버튼·선택 (화면당 주 버튼 하나)
 backgroundColor = "#080F1C"
 secondaryBackgroundColor = "#101D30"  # 카드·입력칸·표 머리
@@ -43,7 +48,19 @@ greenColor = "#2DD4A0"              # 정상·충족
 blueColor = "#60A5FA"
 violetColor = "#A78BFA"
 grayColor = "#9AAFCB"
-baseRadius = "0.75rem"
-buttonRadius = "0.6rem"
-showWidgetBorder = true
 dataframeHeaderBackgroundColor = "#16263D"
+
+[theme.light]
+primaryColor = "#2563EB"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F3F6FB"
+textColor = "#0F172A"
+borderColor = "#D5DEEA"
+linkColor = "#2563EB"
+redColor = "#DC2626"
+orangeColor = "#D97706"
+greenColor = "#059669"
+blueColor = "#2563EB"
+violetColor = "#7C3AED"
+grayColor = "#64748B"
+dataframeHeaderBackgroundColor = "#EEF2F8"

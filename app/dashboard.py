@@ -1,4 +1,4 @@
-"""CAST GUARD AI · 연주 설비 정비 워크스페이스 (시연용). 팀원 설계(작업자·관리자 협업 화면)와 합침, 2026-10-15.
+"""CAST-PdM: 정비 의사결정 지원 솔루션 (시연용). 팀원 설계 화면(원래 이름 CAST GUARD AI)과 합침 2026-10-15, 이름 변경 2026-10-16.
 
     python analysis/05_predict_test.py      # 처음 한 번: 모델 학습·저장 (models/risk24.joblib)
     streamlit run app/dashboard.py          # 브라우저에서 http://localhost:8501
@@ -40,7 +40,7 @@ from src.limitations import LIMITS
 from src.auth import require_login
 from src.serving import cost_curve, explain, failure_hours, load_bundle, score_scenarios
 
-st.set_page_config(page_title='CAST GUARD AI', page_icon=':material/shield:', layout='wide',
+st.set_page_config(page_title='CAST-PdM', page_icon=':material/shield:', layout='wide',
                    initial_sidebar_state='collapsed')
 
 # 실행 방식 (결과보고서 9절·부록 E)
@@ -52,9 +52,9 @@ require_login(st, CLOUD)
 SIGNAL_NAMES = {'Z_MLD-AMP': '몰드 레벨 진폭', 'Z_CONTROL_DELAY': '제어 지연',
                 'Z_WDL': '인발 부하', 'Z_OSC-STK': '진동 스트로크'}
 SPLITS = {'테스트 (정답 없음)': 'test', '검증 (정답 있음)': 'validation'}   # 화면 위 선택지
-# 어두운 배경(CAST GUARD 테마)에서 구분되는 색: 경보 빨강 · 주의 노랑 · 정상 회색 · 정비 띠 · 선(파랑·초록) · 기준선(밝은 글자색)
+# 라이트·다크 테마 모두에서 구분되는 색: 경보 빨강 · 주의 노랑 · 정상 회색 · 정비 띠 · 선(파랑·초록) · 기준선(밝은 글자색)
 ALARM_RED, CAUTION_YELLOW, OK_GRAY, MNT_GRAY = '#FF667A', '#F7B955', '#7D8FA9', '#3A4D66'
-LINE_BLUE, LINE_GREEN, INK = '#60A5FA', '#2DD4A0', '#EDF4FF'
+LINE_BLUE, LINE_GREEN, INK = '#60A5FA', '#2DD4A0', '#8392AB'   # INK: 라이트·다크 모두에서 보이는 회청색 (평균선·기준선)
 # 화면에 보여 줄 단계 이름: 정상(NORMAL) → 주의(CAUTION, 열화 감지) → 경보(WARNING, 24시간 고장 위험)
 # 모델 출력(STAGE)은 '경보'/'주의'/'정상' 그대로 두고 화면에서만 이름을 바꾼다 (결과보고서 8-1절)
 LABEL = {'경보': '경보 (WARNING)', '주의': '주의 (CAUTION)', '정상': '정상 (NORMAL)'}
@@ -101,7 +101,7 @@ CAUTION = bundle.get('caution')          # 주의 모델이 없는 예전 모델
 CTH = CAUTION['threshold'] if CAUTION else None
 
 
-# 화면 위: CAST GUARD AI 머리말 · 시연 설정 · 보는 사람 (팀원 설계 CAST GUARD AI와 합침, 2026-10-15)
+# 화면 위: CAST-PdM 머리말 · 시연 설정 · 보는 사람 (팀원 설계 화면과 합침 2026-10-15)
 #   작업자      현장: 내 팀의 지금 할 일 하나(시작 → 완료 보고), 날짜 대신 재생 시각 기준 지금·지연·예정·완료. 비용 없음
 #   설비관리자  의사결정: 배정할 경보 하나(→ ①로 이동), ① 대상·비용·배정 ② 진행 현황 ③ 하위 페이지(근거·정책·모델)
 WORKER, MANAGER = '현장 작업', '정비 책임자'              # 기록(src/actions.py)에 쓰는 역할 이름
@@ -115,8 +115,8 @@ st.session_state.setdefault('role', WORKER)       # 기본값은 세션 상태�
 st.session_state.setdefault('split_label', list(SPLITS)[0])
 st.session_state.setdefault('now', 72)
 with st.container(horizontal=True, vertical_alignment='center', gap='medium'):
-    st.markdown('### :material/shield: CAST GUARD :blue[AI]')
-    st.caption('연주 설비 정비 워크스페이스 · 시연')
+    st.markdown('### :material/shield: CAST-:blue[PdM]')
+    st.caption('정비 의사결정 지원 솔루션 · 시연')
     st.space('stretch')
     # 시연 설정: 실제 운영에는 없는 재생용 값이라 한 곳에 접어 둔다 (지금 값은 버튼 이름에 보인다)
     with st.popover(f'{st.session_state["split_label"].split(" ")[0]} · {st.session_state["now"]}시간',
@@ -572,12 +572,12 @@ def cost_bars(items, costs):
     for name, v, color, rec in items:
         w = max(2.0, min(100.0, v / top * 100))
         rows.append(
-            f'<div style="background:#101D30;border:1px solid {LINE_BLUE if rec else "#263850"};border-radius:11px;'
+            f'<div style="background:rgba(127,140,160,0.08);border:1px solid {LINE_BLUE if rec else "rgba(127,140,160,0.35)"};border-radius:11px;'
             f'padding:9px 13px;margin:6px 0">'
             f'<div style="display:flex;justify-content:space-between;gap:10px;align-items:center">'
-            f'<span style="color:#CAD6E8;font-weight:650">{html.escape(name)}{" · 추천" if rec else ""}</span>'
+            f'<span style="opacity:0.85;font-weight:650">{html.escape(name)}{" · 추천" if rec else ""}</span>'
             f'<span style="font-weight:800;font-size:1.1rem;font-variant-numeric:tabular-nums">{html.escape(fmt_cost(v, costs))}</span></div>'
-            f'<div style="height:8px;border-radius:99px;background:#25364C;margin-top:8px;overflow:hidden">'
+            f'<div style="height:8px;border-radius:99px;background:rgba(127,140,160,0.25);margin-top:8px;overflow:hidden">'
             f'<div style="height:100%;width:{w:.1f}%;border-radius:99px;background:{color}"></div></div></div>')
     st.markdown(''.join(rows), unsafe_allow_html=True)
 
@@ -1061,7 +1061,7 @@ else:
                         sure = st.checkbox(f'#{tid} 배정을 취소합니다 (작업 목록에서 빠지고, 설비는 다시 배정 대기로)', key=f'cancel_ok_{tid}')
                         st.button('배정 취소', icon=':material/undo:', key=f'cancel_{tid}', disabled=not sure, on_click=cancel_task,
                                   args=(tid, cur['sid'], cur['title']))
-                st.download_button('작업 이력 CSV', tasks.safe_csv(tf.drop(columns=['split'])), file_name=f'cast_guard_tasks_{split}.csv',
+                st.download_button('작업 이력 CSV', tasks.safe_csv(tf.drop(columns=['split'])), file_name=f'cast_pdm_tasks_{split}.csv',
                                    mime='text/csv', icon=':material/download:')
 
         st.session_state.setdefault('sid', sid)
@@ -1162,7 +1162,7 @@ if page == '설비 상세':
     one = alt.Chart(pd.DataFrame({'y': [1]})).mark_rule(color=INK, strokeDash=[2, 2]).encode(y='y:Q')
     st.subheader('네 신호의 흐름', icon=':material/ssid_chart:')
     st.altair_chart(alt.layer(*mnt_layer(sid, None), sig, avg, one).properties(height=300), width='stretch')
-    st.caption('흰 굵은 선: 네 신호 평균 점수 · 점선: 정상 범위 경계(1). 정비 후 재가동하면 처음 2시간은 기준을 잡는 시간이라 비어 있습니다.')
+    st.caption('회색 굵은 선: 네 신호 평균 점수 · 점선: 정상 범위 경계(1). 정비 후 재가동하면 처음 2시간은 기준을 잡는 시간이라 비어 있습니다.')
 
     # 지금 신호 상태와 모델 기여도
     left, right = st.columns(2)

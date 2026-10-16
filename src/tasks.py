@@ -1,4 +1,4 @@
-"""정비 작업 지시: 관리자가 배정하고 작업자가 시작·완료 보고한다 (팀원 설계 CAST GUARD AI의 작업 관리 + 재생 시각).
+"""정비 작업 지시: 관리자가 배정하고 작업자가 시작·완료 보고한다 (팀원 설계 화면의 작업 관리 + 재생 시각).
 
     from src.tasks import TaskStore
     store = TaskStore(path)                  # 로컬: SQLite 파일 / TaskStore(None): 세션 안에서만 (공개 클라우드)

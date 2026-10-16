@@ -1,6 +1,6 @@
 """연주 조기경보 전처리: 5초 원자료 → 1시간 요약 → 부하 보정 → 기준 대비 변화량.
 
-EDA(analysis/01_eda.py, reports/연주_조기경보_결과보고서_상세.md 부록 A)에서 확정한 결정을 함수로 옮긴 것이다.
+EDA(analysis/01_eda.py)에서 확정한 결정을 함수로 옮긴 것이다.
 
     from src.preprocess import build_hourly, fit_params, apply_params
 

@@ -1,7 +1,7 @@
 """연주 설비(P1-CC1-INS01) 조기경보 EDA.
 
 개인 탐색 노트북(eda.ipynb)에서 확정한 내용을 처음부터 끝까지 다시 계산한다.
-절 번호는 결과보고서 상세본 부록 A(reports/연주_조기경보_결과보고서_상세.md)의 근거 번호(E1~E12)와 함께 적혀 있다.
+절 번호마다 EDA 근거 번호(E1~E14)를 함께 적었다.
 
     python analysis/01_eda.py
 
@@ -832,4 +832,4 @@ ax.set_title(f'예: {ex} (열화 시작 {r["열화 시작 → 변화 감지(h)"]
 fig.tight_layout()
 save(fig, '21_eda_추세_변동성_변화점.png')
 
-section('완료: 결론과 결정 사항은 reports/연주_조기경보_결과보고서_상세.md 부록 A 참고')
+section('완료: 결론과 결정 사항은 reports/연주_조기경보_결과보고서.md 3·4장 참고')

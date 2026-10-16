@@ -17,6 +17,8 @@
 
 기록: 작업 지시는 src/tasks.py, 판단·진행 기록(승인·보류·발주·시작·완료·점검 결과)은 src/actions.py.
   로컬은 actions/ 아래 파일(커밋하지 않음), 공개 클라우드는 보는 사람의 세션에만 남긴다.
+  구글 로그인(src/auth.py)과 Secrets [db]가 있으면 공용 DB(Supabase, src/db.py)에 남겨 노트북·폰이 같은 작업을 본다 (2차 2026-10-16)
+  여러 사람이 같이 보는 저장소(공용 DB·로컬 SQLite)에서는 재생 시각도 함께 쓰고, 10초마다 바뀐 것이 있으면 화면을 다시 그린다.
 온톨로지 (src/ontology.py, OWL/RDF): 지금 시각의 설비·예측·신호·경보·정비 결정·조치를 한 그래프로 잇는다.
 """
 
@@ -42,12 +44,36 @@ from src.serving import cost_curve, explain, failure_hours, load_bundle, score_s
 
 st.set_page_config(page_title='CAST-PdM', page_icon=':material/shield:', layout='wide',
                    initial_sidebar_state='collapsed')
+# 폰 홈 화면에 앱처럼 설치 (PWA식, 새 프론트엔드 없이): manifest·아이콘을 문서 머리에 한 번 붙인다
+#   파일은 app/static/ (config.toml enableStaticServing). Streamlit Cloud는 앱을 한 겹 감싼 페이지로 보여 주므로 열 수 있으면 바깥 문서에도 붙인다
+#   폰에서: iPhone Safari 공유 → 홈 화면에 추가 / Android Chrome ⋮ → 홈 화면에 추가
+st.html("""<script>
+(() => {
+  const add = (doc) => {
+    if (!doc || doc.querySelector('link[rel="manifest"]')) return;
+    const base = location.origin + '/app/static/';
+    const tags = [['link', {rel: 'manifest', href: base + 'manifest.json'}],
+                  ['link', {rel: 'apple-touch-icon', href: base + 'apple-touch-icon.png'}],
+                  ['meta', {name: 'apple-mobile-web-app-capable', content: 'yes'}],
+                  ['meta', {name: 'mobile-web-app-capable', content: 'yes'}],
+                  ['meta', {name: 'apple-mobile-web-app-title', content: 'CAST-PdM'}],
+                  ['meta', {name: 'theme-color', content: '#080F1C'}]];
+    for (const [tag, attrs] of tags) {
+      const el = doc.createElement(tag);
+      Object.entries(attrs).forEach(([k, v]) => el.setAttribute(k, v));
+      doc.head.appendChild(el);
+    }
+  };
+  add(document);
+  try { if (window.top !== window) add(window.top.document); } catch (e) {}   // 다른 출처면 건너뛴다
+})();
+</script>""", unsafe_allow_javascript=True, width='content')
 
 # 실행 방식
 #   로컬: data/posko/ 원자료와 models/risk24.joblib로 직접 계산한다 (내 컴퓨터 안에서만 열림, 비밀번호 없음)
 #   클라우드: 원자료가 없고 app_data/만 있다. 미리 계산한 결과만 읽고(모델 파일을 불러오지 않음), 비밀번호를 요구한다
 CLOUD = not (ROOT / 'data' / 'posko').exists() and app_data.available()
-require_login(st, CLOUD)
+USER = require_login(st, CLOUD)     # 구글 로그인한 사람 {'email', 'name', 'role', 'team'} (로그인을 설정하지 않았으면 None)
 
 SIGNAL_NAMES = {'Z_MLD-AMP': '몰드 레벨 진폭', 'Z_CONTROL_DELAY': '제어 지연',
                 'Z_WDL': '인발 부하', 'Z_OSC-STK': '진동 스트로크'}
@@ -101,6 +127,55 @@ CAUTION = bundle.get('caution')          # 주의 모델이 없는 예전 모델
 CTH = CAUTION['threshold'] if CAUTION else None
 
 
+# 저장소: 작업 지시(src/tasks.py)와 판단·진행 기록(src/actions.py)
+#   공용 DB    구글 로그인 + Secrets [db] url (Supabase Postgres, src/db.py). 노트북·폰이 같은 작업을 본다. 그릴 때마다 새로 읽는다
+#   로컬       actions/ 아래 SQLite·CSV (커밋하지 않음). 발표장에서 노트북을 서버로 쓸 때도 이 경로 (같은 Wi-Fi·핫스팟의 폰이 접속)
+#   공개 화면  로그인 없는 클라우드는 서버 파일·DB에 쓰지 않고 보는 사람의 세션에만 (누구나 쓰고 남의 기록을 보는 것을 막는다)
+def db_url():
+    try:
+        return st.secrets['db']['url'] if 'db' in st.secrets else None
+    except Exception:
+        return None
+
+
+@st.cache_resource(show_spinner='공용 DB에 연결하는 중...')
+def get_db(url):
+    from src import db
+    return db.Postgres(url)
+
+
+@st.cache_resource
+def get_local_tasks():
+    return tasks.TaskStore(ROOT / 'actions' / 'tasks.sqlite3')
+
+
+@st.cache_resource
+def get_local_log():
+    return actions.ActionLog(ROOT / 'actions' / 'action_log.csv')
+
+
+PG = None
+if USER and db_url():               # 공용 DB는 로그인한 사람만 쓴다
+    try:
+        PG = get_db(db_url())
+    except Exception as e:          # 접속 주소(비밀번호 포함)가 화면·로그에 나오지 않게 종류만 남긴다
+        print(f'[dashboard] 공용 DB 연결 실패: {type(e).__name__}', file=sys.stderr)
+        st.error('공용 DB에 연결하지 못했습니다. 잠시 뒤 새로 고침하세요. 계속되면 관리자에게 문의하세요.')
+        st.stop()
+if PG:
+    TASKS, LOG = tasks.TaskStore(db=PG), actions.ActionLog(db=PG)
+elif CLOUD:
+    if 'task_store' not in st.session_state:
+        st.session_state['task_store'] = tasks.TaskStore(None)
+        st.session_state['action_log'] = actions.ActionLog(None)
+    TASKS, LOG = st.session_state['task_store'], st.session_state['action_log']
+else:
+    TASKS, LOG = get_local_tasks(), get_local_log()
+STORE_NOTE = ('기록은 공용 DB에 남아 설비관리자·작업자가 같이 봅니다.' if PG else
+              '기록은 이 브라우저 세션에만 남습니다(공개 화면).' if CLOUD else '기록은 이 컴퓨터의 actions/tasks.sqlite3에 남습니다.')
+st.session_state['_fresh'] = True   # 자동 갱신(맨 아래 watch_changes)에 '방금 전체를 다시 그렸다'고 알린다
+
+
 # 화면 위: CAST-PdM 머리말 · 시연 설정 · 보는 사람 (팀원 설계 화면과 합침 2026-10-15)
 #   작업자      현장: 내 팀의 지금 할 일 하나(시작 → 완료 보고), 날짜 대신 재생 시각 기준 지금·지연·예정·완료. 비용 없음
 #   설비관리자  의사결정: 배정할 경보 하나(→ ①로 이동), ① 대상·비용·배정 ② 진행 현황 ③ 하위 페이지(근거·정책·모델)
@@ -114,6 +189,24 @@ ICONS = {WORKER: ':material/engineering:', MANAGER: ':material/manage_accounts:'
 st.session_state.setdefault('role', WORKER)       # 기본값은 세션 상태로만 정한다 (버튼으로 화면을 바꾸기 때문)
 st.session_state.setdefault('split_label', list(SPLITS)[0])
 st.session_state.setdefault('now', 72)
+# 재생 시각 함께 쓰기: 같이 보는 저장소면 설비관리자가 정한 데이터 세트·시각을 모든 화면이 따른다
+#   (따로 두면 관리자가 25시간에 배정한 작업을 작업자가 72시간에 시작해 관리자 화면에서는 '대기'로 남는다)
+CAN_SET_CLOCK = USER is None or USER['role'] == 'manager'
+if TASKS.shared:
+    _split, _now = TASKS.setting('split'), TASKS.setting('now')
+    _label = {v: k for k, v in SPLITS.items()}.get(_split)
+    if _label:
+        st.session_state['split_label'] = _label
+    if _now and _now.isdigit() and 0 <= int(_now) <= 72:
+        st.session_state['now'] = int(_now)
+
+
+def save_clock():
+    if TASKS.shared and CAN_SET_CLOCK:
+        TASKS.set_setting('split', SPLITS[st.session_state['split_label']])
+        TASKS.set_setting('now', str(int(st.session_state['now'])))
+
+
 with st.container(horizontal=True, vertical_alignment='center', gap='medium'):
     st.markdown('### :material/shield: CAST-:blue[PdM]')
     st.caption('정비 의사결정 지원 솔루션 · 시연')
@@ -121,14 +214,21 @@ with st.container(horizontal=True, vertical_alignment='center', gap='medium'):
     # 시연 설정: 실제 운영에는 없는 재생용 값이라 한 곳에 접어 둔다 (지금 값은 버튼 이름에 보인다)
     with st.popover(f'{st.session_state["split_label"].split(" ")[0]} · {st.session_state["now"]}시간',
                     icon=':material/tune:', help='시연 설정: 데이터 세트와 지금 시각'):
-        split_label = st.selectbox('데이터 세트', list(SPLITS), key='split_label',
+        split_label = st.selectbox('데이터 세트', list(SPLITS), key='split_label', on_change=save_clock, disabled=not CAN_SET_CLOCK,
                                    help='테스트: 정답이 없는 실제 운영과 같은 상황 · 검증: 정답이 있어 실제 고장과 비교할 수 있음')
         split = SPLITS[split_label]
-        now = st.slider('지금 시각 (시나리오 시작 후 h)', 0, 72, step=1, key='now',
+        now = st.slider('지금 시각 (시나리오 시작 후 h)', 0, 72, step=1, key='now', on_change=save_clock, disabled=not CAN_SET_CLOCK,
                         help='이 시각까지의 데이터만으로 본 상태를 보여 줍니다. 왼쪽으로 옮기면 과거로 돌아가 재생할 수 있습니다.')
         show_truth = st.toggle('정답 보기 (검증 세트)', key='truth', disabled=split != 'validation',
                                help='앞으로 일어날 실제 고장 시각(정답)을 겹쳐 봅니다. 모델은 이 정보를 보지 않습니다.') and split == 'validation'
-        st.caption('독립된 합성 시나리오를 재생합니다 · 실시간 설비 연결 아님')
+        st.caption('독립된 합성 시나리오를 재생합니다 · 실시간 설비 연결 아님'
+                   + (' · 데이터 세트와 시각은 모든 화면이 함께 씁니다' + ('' if CAN_SET_CLOCK else ' (설비관리자가 바꿈)')
+                      if TASKS.shared else ''))
+    if USER:
+        with st.popover(USER['name'].split('@')[0], icon=':material/account_circle:'):
+            st.caption(USER['email'])
+            st.markdown('설비관리자' if USER['role'] == 'manager' else f'작업자 · {USER["team"]}')
+            st.button('로그아웃', icon=':material/logout:', on_click=st.logout)
 # 주소(URL)와 화면 위치를 맞춘다 → 브라우저·마우스의 뒤로 가기/앞으로 가기가 된다
 #   ?view=m (설비관리자) &page=설비 상세|정책·비용|... (관리자 하위 페이지) &sid=S0294. 작업자는 내 작업 하나라 주소가 비어 있다
 #   Streamlit은 st.query_params를 바꾸면 기록을 하나 쌓고(pushState), 뒤로 가기로 주소가 바뀌면 그 주소로 다시 실행한다.
@@ -197,8 +297,19 @@ def close_sub():
         st.session_state['scroll_top'] = True
 
 
-role = st.segmented_control('보는 사람', [MANAGER, WORKER], key='role', required=True, label_visibility='collapsed', on_change=close_sub,
-                            format_func=lambda r: f'{ICONS[r]} {ROLE_LABEL[r]}')
+# 구글 로그인한 작업자는 자기 팀의 내 작업만 (주소에 ?view=m을 넣어도 설비관리자 화면으로 가지 않는다)
+LOCKED_WORKER = USER is not None and USER['role'] == 'worker'
+if LOCKED_WORKER:
+    if USER['team'] not in tasks.TEAMS:
+        st.error('등록된 팀 이름이 맞지 않습니다. 설비관리자에게 문의하세요.')
+        st.stop()
+    st.session_state['role'] = WORKER
+    st.session_state.pop('msub', None)
+    st.session_state['my_team'] = USER['team']
+    role = WORKER
+else:
+    role = st.segmented_control('보는 사람', [MANAGER, WORKER], key='role', required=True, label_visibility='collapsed',
+                                on_change=close_sub, format_func=lambda r: f'{ICONS[r]} {ROLE_LABEL[r]}')
 
 pts, hr, contrib, contrib_unit, mnt = get_data(split)
 
@@ -225,19 +336,6 @@ mnt_now = mnt[mnt['START_H'] <= now].assign(
 last_mnt_start = mnt_now.groupby('SCENARIO_ID')['START_H'].max()     # 지금까지 마지막으로 시작된 정비
 
 
-# 액션 기록 (src/actions.py): 로컬은 CSV 파일(actions/, 커밋하지 않음), 클라우드는 보는 사람의 세션에만
-#   클라우드 대시보드는 공개(비밀번호 없음)라 서버 파일에 쓰게 하면 누구나 기록을 남기고 남의 기록을 볼 수 있다
-@st.cache_resource
-def get_local_log():
-    return actions.ActionLog(ROOT / 'actions' / 'action_log.csv')
-
-
-if CLOUD:
-    if 'action_log' not in st.session_state:
-        st.session_state['action_log'] = actions.ActionLog(None)
-    LOG = st.session_state['action_log']
-else:
-    LOG = get_local_log()
 MNT_START = last_mnt_start.to_dict()
 
 
@@ -532,20 +630,6 @@ def act(kind, sid, role_, note_key=None, **kw):
 
 RISK_BADGE = {'높음': ':red-badge[:material/warning: 끝나기 전 고장 위험 높음]', '보통': ':orange-badge[끝나기 전 고장 위험 보통]',
               '낮음': ':green-badge[끝나기 전 고장 위험 낮음]', '—': ''}
-# 작업 지시 저장 (src/tasks.py): 로컬은 SQLite(actions/tasks.sqlite3, 커밋하지 않음), 공개 클라우드는 보는 사람의 세션에만
-
-@st.cache_resource
-def get_local_tasks():
-    return tasks.TaskStore(ROOT / 'actions' / 'tasks.sqlite3')
-
-
-if CLOUD:
-    if 'task_store' not in st.session_state:
-        st.session_state['task_store'] = tasks.TaskStore(None)
-    TASKS = st.session_state['task_store']
-else:
-    TASKS = get_local_tasks()
-
 PRIORITY_BADGE = {'긴급': ':red-badge[긴급]', '높음': ':orange-badge[높음]', '보통': ':gray-badge[보통]'}
 TASK_BADGE = {'대기': ':gray-badge[대기]', '진행 중': ':blue-badge[:material/build: 진행 중]', '완료': ':green-badge[:material/task_alt: 완료]'}
 
@@ -684,6 +768,33 @@ def task_line(r):
                       on_click=lambda i=int(r['id']): st.session_state.update({'focus_tid': i}))
 
 
+# 알림: 다른 사람이 한 일 (설비관리자 ← 완료 보고, 작업자 ← 새 배정). 재생 시각을 옮겨서 바뀐 것은 알리지 않는다
+#   실제로 일어난 일(완료 보고 기록 시각·새 작업 번호)을 이 세션이 이미 본 것과 비교한다. 데이터 세트를 처음 볼 때는 기록만 한다
+
+def notify():
+    if not TASKS.shared:
+        return
+    allt = TASKS.all(split)
+    seen = st.session_state.setdefault('_seen', {})
+    if role == MANAGER:
+        cur = {int(r.id): r for r in allt[allt['completed_at'].fillna('') != ''].itertuples()}
+        key = ('done', split)
+        for i in sorted(set(cur) - seen.get(key, set(cur))):
+            r = cur[i]
+            st.toast(f'완료 보고 · {r.sid} {r.outcome} ({r.team}, 작업 #{i})', icon=':material/task_alt:', duration='long')
+    else:
+        team_ = st.session_state.get('my_team', list(tasks.TEAMS)[0])
+        cur = {int(r.id): r for r in allt[allt['team'] == team_].itertuples()}
+        key = ('new', split, team_)
+        for i in sorted(set(cur) - seen.get(key, set(cur))):
+            r = cur[i]
+            st.toast(f'새 작업 · {r.title} ({r.priority})', icon=':material/assignment_ind:', duration='long')
+    seen[key] = set(cur)
+
+
+notify()
+
+
 # 0. 작업자: 내 작업 (지금 할 일 하나 → 시작 → 완료 보고)
 
 page = None
@@ -702,6 +813,7 @@ if role == WORKER:
         st.subheader('내 작업', icon=':material/checklist:')
         st.space('stretch')
         team = st.segmented_control('내 팀', list(tasks.TEAMS), key='my_team', required=True, label_visibility='collapsed',
+                                    disabled=LOCKED_WORKER,
                                     help='팀원: ' + ' / '.join(f'{k} ' + '·'.join(v) for k, v in tasks.TEAMS.items()))
     mine = tf[tf['team'] == team]
     open_ = mine[mine['상태'] != '완료']
@@ -788,7 +900,7 @@ if role == WORKER:
             for _, r in rows.iterrows():
                 task_line(r)
     st.caption('재생 시각 기준: 지금 = 예정 시각이 됨 · 지연 = 예정 시각이 지났는데 시작 전 · 예정 = 아직 · '
-               + ('기록은 이 브라우저 세션에만 남습니다(공개 화면).' if CLOUD else '기록은 이 컴퓨터의 actions/tasks.sqlite3에 남습니다.'))
+               + STORE_NOTE)
 
 
 # 1. 설비관리자: 배정할 경보 하나 → ① 대상·비용·배정 ② 진행 현황, ③ 아래 탭
@@ -1552,3 +1664,27 @@ elif page == '비용 계산기':
 
 # 화면 위치 → 주소 (뒤로 가기·앞으로 가기용, 맨 위 apply_url과 짝)
 sync_url()
+
+
+# 자동 갱신: 같이 보는 저장소면 10초마다 바뀐 것이 있는지만 가볍게 확인하고, 바뀌었을 때만 화면 전체를 다시 그린다
+#   (그리던 입력칸 값은 그대로 남는다). 공개 화면(세션 저장)은 혼자 보므로 하지 않는다
+AUTO_REFRESH_S = 10
+
+
+@st.fragment(run_every=AUTO_REFRESH_S)
+def watch_changes():
+    try:
+        v = TASKS.version()
+    except Exception as e:
+        print(f'[dashboard] 자동 갱신 확인 실패: {type(e).__name__}', file=sys.stderr)
+        return
+    if st.session_state.pop('_fresh', False) or '_ver' not in st.session_state:
+        st.session_state['_ver'] = v          # 방금 전체를 그렸다: 지금 상태를 기준으로
+        return
+    if v != st.session_state['_ver']:
+        st.session_state['_ver'] = v
+        st.rerun(scope='app')
+
+
+if TASKS.shared:
+    watch_changes()

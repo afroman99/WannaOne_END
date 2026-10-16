@@ -19,6 +19,7 @@
 숫자를 일부러 바꾼 경우(모델 개선 등)에는 보고서를 고친 뒤 EXPECTED도 함께 고친다.
 """
 
+import os
 import shutil
 import sys
 import tempfile
@@ -349,6 +350,34 @@ _lg.record('점검 결과', 'test', 'S0294', 70, '정비 책임자', judged='val
 check('완료 보고를 고치면 점검 되먹임은 마지막 보고만 센다', _lg.inspection_accuracy() == (1, 0.0))
 _lg.record('점검 결과', 'test', 'S0294', 70, '정비 책임자', judged='구분 못함', confirmed='아직 모름', note='완료 되돌림')
 check('완료를 되돌리면 그때의 점검 결과는 되먹임에서 빠진다', _lg.inspection_accuracy() == (0, None))
+from src.auth import lookup as _lookup
+_users = {'managers': ['Boss@gmail.com'], 'teams': {'정비 1팀': ['w1@gmail.com'], '정비 2팀': ['w2@gmail.com']}}
+check('구글 로그인 역할: 등록된 이메일만 (대소문자 무시), 작업자는 팀까지',
+      _lookup(_users, 'boss@GMAIL.com') == ('manager', None) and _lookup(_users, 'w2@gmail.com') == ('worker', '정비 2팀')
+      and _lookup(_users, 'other@gmail.com') == (None, None) and _lookup(None, 'w1@gmail.com') == (None, None)
+      and _lookup(_users, '') == (None, None))
+with _tf.TemporaryDirectory() as d:
+    _s = _tk.TaskStore(Path(d) / 't.sqlite3')
+    _v0 = _s.version()
+    _s.set_setting('now', '25')
+    _s.add('test', 'S0294', 't', '정비 1팀', '보통', 1, 1, '', '')
+    _v1 = _s.version()
+    _s.start(int(_s.all()['id'].iloc[0]), 2)
+    check('함께 보는 재생 시각과 바뀜 확인 (SQLite): 설정·배정·시작마다 version이 바뀐다',
+          _tk.TaskStore(Path(d) / 't.sqlite3').setting('now') == '25' and len({_v0, _v1, _s.version()}) == 3)
+check('세션 저장(공개 화면)은 함께 보는 저장소가 아니다 (자동 갱신·시각 공유 안 함)', not _tk.TaskStore(None).shared)
+if os.environ.get('TEST_PG_URL'):       # 공용 DB 시험 (선택): TEST_PG_URL=postgresql://... python tests/check_regression.py
+    from src import db as _db
+    _pg = _db.Postgres(os.environ['TEST_PG_URL'])
+    with _pg.conn() as c:
+        c.execute('TRUNCATE castpdm.tasks, castpdm.action_log, castpdm.settings')
+    _ps = _tk.TaskStore(db=_pg)
+    _ok = [_ps.add('test', 'S0294', 't', '정비 1팀', '보통', 1, 1, '', ''), _ps.add('test', 'S0294', 't', '정비 1팀', '보통', 1, 2, '', '')]
+    _pl = _ac.ActionLog(db=_pg)
+    _pl.record('승인', 'test', 'S0294', 1, '정비 책임자')
+    check('공용 DB: 같은 설비 중복 배정을 막고, 기록은 다시 읽어도 남는다',
+          _ok == [True, False] and len(_ac.ActionLog(db=_pg).rows) == 1 and len(_tk.TaskStore(db=_pg).all()) == 1)
+    _pg.close()
 check('작업 지시 SQLite 파일은 커밋되지 않는다 (actions/ 무시)',
       __import__('subprocess').run(['git', 'check-ignore', '-q', 'actions/tasks.sqlite3'], cwd=ROOT).returncode == 0)
 

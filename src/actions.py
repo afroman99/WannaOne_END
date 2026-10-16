@@ -2,6 +2,7 @@
 
     from src.actions import ActionLog
     log = ActionLog(path)            # 로컬: CSV 파일에 쌓는다 / ActionLog(None): 세션 안에서만 (클라우드)
+    log = ActionLog(db=pg)           # 공용 DB (src/db.py의 castpdm.action_log). 만들 때 한 번 읽고, 기록은 DB와 메모리에 같이 쓴다
     log.record(kind='승인', split='validation', sid='S0248', hour=16, role='정비 책임자', option='다음 정기 교체 때 두 부품 함께')
     log.decision_state('validation', 16, last_mnt_start)     # 설비마다 지금 유효한 승인·보류
     log.inspection_accuracy()                                # 점검으로 원인 부품을 맞힌 비율 (되먹임)
@@ -18,6 +19,7 @@
 
 보안
   - 클라우드(공개, 비밀번호 없음)에서는 파일에 쓰지 않는다. 기록은 보는 사람의 세션에만 있다(다른 사람에게 보이지 않음)
+  - 공용 DB는 구글 로그인으로 허락된 사람만 쓴다 (app/dashboard.py, src/auth.py)
   - 모든 값은 정해진 선택지·형식만 받는다. 메모는 200자, 제어 문자 제거, 표 계산기 수식으로 읽히는 첫 글자(= + - @)는 막는다
   - 파일에서 읽은 줄도 같은 검사를 거쳐, 맞지 않는 줄은 버린다
 """
@@ -37,6 +39,7 @@ PARTS = ['valve', 'oscillator']
 JUDGED = PARTS + ['구분 못함']
 CONFIRMED = PARTS + ['아직 모름']
 COLUMNS = ['기록 시각', '데이터 세트', '설비', '시각(h)', '종류', '누가', '선택지', '부품', '점검 판단', '확인된 원인', '메모']
+DB_COLUMNS = dict(zip(COLUMNS, ['recorded_at', 'split', 'sid', 'hour', 'kind', 'who', 'option', 'part', 'judged', 'confirmed', 'note']))
 MIN_CONFIRMED = 10          # 되먹임을 쓰기 시작하는 최소 기록 수 (가정값)
 MAX_NOTE = 200
 _SID = re.compile(r'^S\d{4}$')
@@ -78,12 +81,21 @@ def validate(row):
 
 
 class ActionLog:
-    """path가 있으면 CSV 파일(로컬), 없으면 메모리(세션)에 쌓는다"""
+    """db가 있으면 공용 DB, path가 있으면 CSV 파일(로컬), 없으면 메모리(세션)에 쌓는다"""
 
-    def __init__(self, path=None, rows=None):
-        self.path = Path(path) if path else None
+    def __init__(self, path=None, rows=None, db=None):
+        self.db = db
+        self.path = Path(path) if path and not db else None
         self.rows = rows if rows is not None else []
-        if self.path and self.path.exists():
+        if self.db:
+            with self.db.conn() as c:
+                raws = c.execute(f'SELECT {",".join(DB_COLUMNS.values())} FROM castpdm.action_log ORDER BY id').fetchall()
+            for raw in raws:
+                try:
+                    self.rows.append(validate({k: raw[v] for k, v in DB_COLUMNS.items()}))
+                except (ValueError, TypeError):
+                    continue
+        elif self.path and self.path.exists():
             with open(self.path, encoding='utf-8', newline='') as f:
                 for raw in csv.DictReader(f):
                     try:
@@ -94,6 +106,10 @@ class ActionLog:
     def record(self, kind, split, sid, hour, role, option='', part='', judged='', confirmed='', note=''):
         r = validate({'종류': kind, '데이터 세트': split, '설비': sid, '시각(h)': hour, '누가': role, '선택지': option,
                       '부품': part, '점검 판단': judged, '확인된 원인': confirmed, '메모': note})
+        if self.db:                              # DB에 먼저 쓴다 (실패하면 화면에도 남기지 않는다)
+            with self.db.conn() as c:
+                c.execute(f'INSERT INTO castpdm.action_log ({",".join(DB_COLUMNS.values())}) '
+                          f'VALUES ({",".join("?" * len(DB_COLUMNS))})', [r[k] for k in DB_COLUMNS])
         self.rows.append(r)
         if self.path:
             self.path.parent.mkdir(exist_ok=True)

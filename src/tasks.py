@@ -2,22 +2,26 @@
 
     from src.tasks import TaskStore
     store = TaskStore(path)                  # 로컬: SQLite 파일 / TaskStore(None): 세션 안에서만 (공개 클라우드)
+    store = TaskStore(db=pg)                 # 공용 DB (src/db.py, Supabase Postgres): 로그인한 설비관리자·작업자가 같이 본다
     store.add(split, sid, title, team, priority, due_h, created_h, guide, reason, option)   # 같은 설비에 열린 작업이 있으면 False
     store.start(task_id, hour); store.complete(task_id, hour, outcome, details, judged, confirmed)
     store.edit(...)  /  store.edit_report(task_id, outcome, details, judged, confirmed)   # 완료된 작업의 보고 고치기
     store.frame(split, now)                  # 지금 시각에 보이는 작업과 상태(대기·진행 중·완료)
+    store.setting(key) / store.set_setting(key, value)   # 함께 보는 값 (재생 시각 등)
+    store.version()                          # 바뀌었는지 가볍게 확인 (자동 갱신·알림용)
 
 재생 시각: 데이터는 시나리오 시작 후 0~72시간을 재생한다. 그래서 작업의 배정·시작·완료와 예정 시각을 시나리오 시각(h)으로
 적고, 상태는 '지금 시각'으로 계산한다(슬라이더를 과거로 옮기면 그때의 작업만 보인다). 실제 기록 시각은 이력에만 남긴다.
 
-저장 (팀 결정 2026-10-15)
+저장 (팀 결정 2026-10-15, 공용 DB 2026-10-16)
   로컬      SQLite 파일 actions/tasks.sqlite3 (.gitignore). 연결은 쓸 때마다 열고 닫는다
-  클라우드  공개(비밀번호 없음)라 서버 파일에 쓰지 않고 보는 사람의 세션에만 둔다
+  공용 DB   Supabase Postgres (castpdm.tasks). 구글 로그인을 켠 배포에서만 쓴다. 한 번 화면을 그리는 동안은 처음 읽은 표를 다시 쓴다
+  클라우드  로그인 없는 공개 화면은 서버 파일·DB에 쓰지 않고 보는 사람의 세션에만 둔다
 
 검사
   - 팀·우선순위·결과·부품은 정해진 값만, 설비 ID는 S0000 형식, 시각은 0~240시간
   - 글은 길이 제한과 제어 문자 제거(줄바꿈은 유지). 내려받는 CSV는 수식으로 읽히는 첫 글자(= + - @)를 막는다
-  - 같은 설비에 열린(완료 전) 작업이 있으면 배정하지 않는다 (SQLite는 한 트랜잭션 안에서 확인하고 넣는다)
+  - 같은 설비에 열린(완료 전) 작업이 있으면 배정하지 않는다 (SQLite는 한 트랜잭션 안에서, Postgres는 설비별 잠금을 잡고 확인하고 넣는다)
 """
 
 import contextlib
@@ -48,6 +52,7 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS tasks(
     outcome TEXT NOT NULL DEFAULT '', details TEXT NOT NULL DEFAULT '', judged TEXT NOT NULL DEFAULT '',
     confirmed TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
     completed_at TEXT NOT NULL DEFAULT '')"""
+SETTINGS_SCHEMA = 'CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)'
 
 DEFAULT_GUIDE = ('① 안전 절차·작업 허가 확인\n'
                  '② 설비 정지와 잠금(LOTO) 확인\n'
@@ -86,37 +91,87 @@ def safe_csv(df):
 
 
 class TaskStore:
-    """path가 있으면 SQLite(로컬), 없으면 메모리(세션)"""
+    """db가 있으면 공용 DB(Postgres), path가 있으면 SQLite(로컬), 둘 다 없으면 메모리(세션)"""
 
-    def __init__(self, path=None):
-        self.path = Path(path) if path else None
+    def __init__(self, path=None, db=None):
+        self.db = db
+        self.path = Path(path) if path and not db else None
         self.rows = []
+        self.settings = {}
+        self._cache = None               # 공용 DB: 한 번 그리는 동안 읽은 표 (쓰면 지운다)
+        self.T, self.S = ('castpdm.tasks', 'castpdm.settings') if db else ('tasks', 'settings')
         if self.path:
             with self._conn():
                 pass                     # 파일과 표를 미리 만든다
 
+    @property
+    def shared(self):
+        """여러 사람이 같이 보는 저장소인가 (세션 메모리가 아님)"""
+        return bool(self.db or self.path)
+
     @contextlib.contextmanager
     def _conn(self):
         """연결을 열고, 끝나면 커밋(오류면 되돌림)하고 닫는다 (sqlite3의 with는 닫지 않아 직접 닫는다)"""
+        if self.db:
+            with self.db.conn() as c:
+                yield c
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)      # 폴더·파일이 지워져도 다시 만든다
         conn = sqlite3.connect(self.path, timeout=20, isolation_level=None)
         conn.row_factory = sqlite3.Row
         try:
             conn.execute('PRAGMA busy_timeout=20000')
             conn.execute(SCHEMA)
+            conn.execute(SETTINGS_SCHEMA)
             yield conn
         finally:
             conn.close()
 
+    # 함께 보는 값 (재생 시각·데이터 세트: 설비관리자가 바꾸면 작업자 화면도 따라간다)
+
+    def setting(self, key, default=None):
+        if not self.shared:
+            return self.settings.get(key, default)
+        with self._conn() as c:
+            r = c.execute(f'SELECT value FROM {self.S} WHERE key=?', [key]).fetchone()
+        return r['value'] if r else default
+
+    def set_setting(self, key, value):
+        value = clean(value, 100)
+        if not self.shared:
+            self.settings[key] = value
+            return
+        with self._conn() as c:
+            c.execute(f'INSERT INTO {self.S}(key, value, updated_at) VALUES (?, ?, ?) '
+                      'ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at',
+                      [key, value, _now()])
+
+    def version(self):
+        """작업 표·함께 보는 값이 바뀌었는지 가볍게 확인 (작은 쿼리 두 개). 자동 갱신이 이 값이 바뀔 때만 화면을 다시 그린다"""
+        if not self.shared:
+            return (len(self.rows), max([r['updated_at'] for r in self.rows], default=''), tuple(sorted(self.settings.items())))
+        with self._conn() as c:
+            r = c.execute(f"SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS m, COALESCE(MAX(updated_at), '') AS u FROM {self.T}").fetchone()
+            kv = tuple((x['key'], x['value']) for x in c.execute(f'SELECT key, value FROM {self.S} ORDER BY key').fetchall())
+        return (int(r['n']), int(r['m']), r['u'], kv)
+
     # 읽기
 
     def all(self, split=None):
-        if self.path:
+        if self.db and self._cache is not None:
+            df = self._cache
+        elif self.shared:
             with self._conn() as c:
-                df = pd.read_sql_query('SELECT * FROM tasks', c)
+                df = pd.DataFrame([dict(r) for r in c.execute(f'SELECT * FROM {self.T} ORDER BY id').fetchall()],
+                                  columns=COLUMNS)
+            for k in ('due_h', 'created_h', 'started_h', 'completed_h'):
+                df[k] = pd.to_numeric(df[k]).astype(float)
+            df['id'] = df['id'].astype(int)
+            if self.db:
+                self._cache = df
         else:
             df = pd.DataFrame(self.rows, columns=COLUMNS)
-        df = df.reindex(columns=COLUMNS)
+        df = df.reindex(columns=COLUMNS).copy()
         return df[df['split'] == split].reset_index(drop=True) if split else df
 
     def frame(self, split, now):
@@ -171,16 +226,27 @@ class TaskStore:
                'guide': clean(guide, LIMITS['guide']), 'reason': clean(reason, LIMITS['reason']),
                'option': clean(option, LIMITS['option']), 'outcome': '', 'details': '', 'judged': '', 'confirmed': '',
                'created_at': stamp, 'updated_at': stamp, 'completed_at': ''}
+        keys = [k for k in COLUMNS if k != 'id']
+        insert = f'INSERT INTO {self.T} ({",".join(keys)}) VALUES ({",".join("?" * len(keys))})'
+        select = f'SELECT created_h, completed_h FROM {self.T} WHERE split=? AND sid=?'
+        if self.db:
+            self._cache = None
+            with self._conn() as c:      # 한 트랜잭션: 이 설비의 잠금을 잡고(다른 사람의 동시 배정은 기다림) 확인하고 넣는다
+                c.execute('SELECT pg_advisory_xact_lock(hashtext(?))', [f'castpdm:{split}:{sid}'])
+                rows = c.execute(select, (split, sid)).fetchall()
+                if any(_conflict(r['created_h'], r['completed_h'], row['created_h']) for r in rows):
+                    return False
+                c.execute(insert, [row[k] for k in keys])
+            return True
         if self.path:
             with self._conn() as c:
                 c.execute('BEGIN IMMEDIATE')
                 try:
-                    rows = c.execute('SELECT created_h, completed_h FROM tasks WHERE split=? AND sid=?', (split, sid)).fetchall()
+                    rows = c.execute(select, (split, sid)).fetchall()
                     if any(_conflict(r['created_h'], r['completed_h'], row['created_h']) for r in rows):
                         c.execute('ROLLBACK')
                         return False
-                    keys = [k for k in COLUMNS if k != 'id']
-                    c.execute(f'INSERT INTO tasks ({",".join(keys)}) VALUES ({",".join("?" * len(keys))})', [row[k] for k in keys])
+                    c.execute(insert, [row[k] for k in keys])
                     c.execute('COMMIT')
                 except Exception:
                     c.execute('ROLLBACK')
@@ -194,11 +260,12 @@ class TaskStore:
         return True
 
     def _update(self, task_id, fields, where_open=False, where_done=False):
-        fields = {**fields, 'updated_at': _now()}
-        if self.path:
+        fields = {**fields, 'updated_at': dt.datetime.now().isoformat(timespec='microseconds')}   # 1초 안에 두 번 바뀌어도 version이 달라지게
+        self._cache = None
+        if self.shared:
             with self._conn() as c:
                 sets = ','.join(f'{k}=?' for k in fields)
-                sql = (f'UPDATE tasks SET {sets} WHERE id=?' + (' AND completed_h IS NULL' if where_open else '')
+                sql = (f'UPDATE {self.T} SET {sets} WHERE id=?' + (' AND completed_h IS NULL' if where_open else '')
                        + (' AND completed_h IS NOT NULL' if where_done else ''))
                 return c.execute(sql, [*fields.values(), int(task_id)]).rowcount > 0
         for r in self.rows:
@@ -251,9 +318,10 @@ class TaskStore:
     def cancel(self, task_id):
         """배정 취소 (설비관리자): 완료 전 작업만 지운다. 그 설비는 다시 '배정할 경보'로 돌아간다.
         취소 이력은 진행 기록(src/actions.py의 '배정 취소')에 남긴다. 완료된 작업은 먼저 상태를 되돌려야 한다"""
-        if self.path:
+        self._cache = None
+        if self.shared:
             with self._conn() as c:
-                return c.execute('DELETE FROM tasks WHERE id=? AND completed_h IS NULL', [int(task_id)]).rowcount > 0
+                return c.execute(f'DELETE FROM {self.T} WHERE id=? AND completed_h IS NULL', [int(task_id)]).rowcount > 0
         n = len(self.rows)
         self.rows = [r for r in self.rows if not (r['id'] == int(task_id) and r['completed_h'] is None)]
         return len(self.rows) < n

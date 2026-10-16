@@ -210,3 +210,6 @@ models/
 
 # 대시보드 조치 기록 (로컬 전용, src/actions.py)
 actions/
+
+# 보고서 PDF (reports/*.md를 Chrome 인쇄로 만든 제출용 사본). 원본은 .md라 PDF는 커밋하지 않는다 (2026-10-16)
+reports/*.pdf

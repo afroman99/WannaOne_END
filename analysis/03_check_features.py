@@ -214,8 +214,8 @@ show_ids = fails['SCENARIO_ID'].drop_duplicates().iloc[:6].tolist()
 fig, axes = plt.subplots(len(show_ids), 1, figsize=(11, 2.2 * len(show_ids)), sharex=True)
 for ax, sid in zip(axes, show_ids):
     g = X[X['SCENARIO_ID'] == sid]
-    ax.plot(g['T_H'], g['SCORE'], marker='o', label='SCORE (재가동 후 기준)')
-    ax.plot(g['T_H'], g['SCORE_F'], marker='s', label='SCORE_F (처음 수준 기준)')
+    ax.plot(g['T_H'], g['SCORE'], marker='o', label='네 신호 평균 점수 (재가동 후 기준)')
+    ax.plot(g['T_H'], g['SCORE_F'], marker='s', label='네 신호 평균 점수 (처음 수준 기준)')
     for m in mnt[mnt['SCENARIO_ID'] == sid].itertuples():
         a = (m.STRT_DT - START[sid]).total_seconds() / 3600
         b = (m.END_DT - START[sid]).total_seconds() / 3600 if pd.notna(m.END_DT) else 72

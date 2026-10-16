@@ -1,7 +1,7 @@
 """연주 설비(P1-CC1-INS01) 조기경보 EDA.
 
 개인 탐색 노트북(eda.ipynb)에서 확정한 내용을 처음부터 끝까지 다시 계산한다.
-절 번호는 결과보고서 부록 A(reports/연주_조기경보_결과보고서.md)의 근거 번호(E1~E12)와 함께 적혀 있다.
+절 번호는 결과보고서 상세본 부록 A(reports/연주_조기경보_결과보고서_상세.md)의 근거 번호(E1~E12)와 함께 적혀 있다.
 
     python analysis/01_eda.py
 
@@ -49,6 +49,27 @@ SENSORS = ['LOAD', 'WD-SPD', 'WD-LOD', 'OSC-FRQ', 'OSC-STK', 'MLD-LVL', 'CONTROL
 MAIN_MODES = ['friction', 'sticking', 'control-delay']  # 주 고장 원인 (background-wear 제외)
 MODE_COLOR = dict(zip(MAIN_MODES, ['#2f5d8a', '#e07b39', '#4a9b5e']))
 STATE_COLOR = {'degraded': '#f2c94c', 'failed': '#eb5757', 'maintenance': '#bdbdbd'}
+
+# 그림 라벨은 한국어로 (데이터 열 이름·원인 코드는 그대로 두고 그림에서만 바꾼다)
+MODE_KO = {'normal': '정상', 'friction': '마찰(진동장치)', 'sticking': '고착(밸브)', 'control-delay': '제어 지연(밸브)'}
+PART_KO = {'valve': '밸브', 'oscillator': '진동장치'}
+BASE_KO = {'LOAD': '부하', 'WD-SPD': '인발 속도', 'WD-LOD': '인발 부하', 'OSC-FRQ': '진동 주파수', 'OSC-STK': '진동 스트로크',
+           'MLD-LVL': '몰드 레벨', 'MLD-AMP': '몰드 레벨 진폭', 'CONTROL_DELAY': '제어 지연', 'WDL_C': '인발 부하(보정)', 'WDL': '인발 부하(보정)'}
+
+
+def ko(col):
+    """열 이름 → 그림 라벨 (예: Z_MLD-AMP_D → 몰드 레벨 진폭 변화량, -OSC-STK_D → 진동 스트로크 변화량 (감소 방향))"""
+    c = str(col)
+    flip = ' (감소 방향)' if c.startswith('-') else ''   # 한글 글꼴에 − 기호가 없어 말로 쓴다
+    c = c.lstrip('-')
+    for pre in ('Z_', 'P_'):
+        c = c.removeprefix(pre)
+    suffix = ''
+    for suf, word in (('_ADJ_D', ' 변화량'), ('_D', ' 변화량'), ('_F', ' (처음 대비)'), ('_ADJ', ' (보정)')):
+        if c.endswith(suf):
+            c, suffix = c[:-len(suf)], word
+            break
+    return BASE_KO.get(c, c) + suffix + flip
 
 
 def section(title):
@@ -174,9 +195,9 @@ for j, (mode, sid) in enumerate(REP.items()):
                            color=STATE_COLOR[r.HEALTH_STATE], alpha=0.35, lw=0)
         ax.plot(g['H'], g[col], lw=0.4, color='#2f5d8a')
         if j == 0:
-            ax.set_ylabel(col)
+            ax.set_ylabel(ko(col))
         if i == 0:
-            ax.set_title(f'{mode} ({sid})')
+            ax.set_title(f'{MODE_KO.get(mode, mode)} ({sid})')
 for ax in axes[-1]:
     ax.set_xlabel('경과 시간(h)')
     ax.set_xticks(range(0, 73, 12))
@@ -279,9 +300,9 @@ for j, mode in enumerate(MAIN_MODES):
         ax.plot(q.index, q[0.5], color='#2f5d8a', lw=1.5)
         ax.axhline(0, color='k', lw=0.5)
         if j == 0:
-            ax.set_ylabel(c)
+            ax.set_ylabel(ko(c))
         if i == 0:
-            ax.set_title(f'{mode} (고장 시나리오 {p["SCENARIO_ID"].nunique()}개)')
+            ax.set_title(f'{MODE_KO.get(mode, mode)} (고장 시나리오 {p["SCENARIO_ID"].nunique()}개)')
 for ax in axes[-1]:
     ax.set_xlabel('고장까지 남은 시간(h)')
     ax.set_xticks(range(-48, 1, 12))
@@ -313,8 +334,8 @@ sid = (fit['기울기'] - fit['기울기'].median()).abs().idxmax()     # 기울
 g = hr[hr['SCENARIO_ID'] == sid]
 fig, axes = plt.subplots(len(WDL_OPTS) + 1, 1, figsize=(12, 8), sharex=True)
 axes[0].plot(g['HOUR'], g['LOAD'], color='#888888')
-axes[0].set_ylabel('LOAD')
-axes[0].set_title(f'정상 시나리오 {sid}의 WD-LOD 보정 비교 (부하 기울기 {fit.loc[sid, "기울기"]:.0f}, 공통 {fit["기울기"].median():.0f})')
+axes[0].set_ylabel('부하')
+axes[0].set_title(f'정상 시나리오 {sid}의 인발 부하 보정 비교 (부하 기울기 {fit.loc[sid, "기울기"]:.0f}, 공통 {fit["기울기"].median():.0f})')
 for ax, (name, col) in zip(axes[1:], WDL_OPTS.items()):
     ax.plot(g['HOUR'], g[col + '_D'], color='#2f5d8a')
     ax.axhline(0, color='k', lw=0.5)
@@ -368,7 +389,7 @@ g = det[det['TYPE'] == '점진 고장']
 fig, ax = plt.subplots(figsize=(6, 5))
 for mode, color in MODE_COLOR.items():
     s = g[g['MODE'] == mode]
-    ax.scatter(s['LEAD_H'], s['ANY2'], label=mode, color=color, alpha=0.8)
+    ax.scatter(s['LEAD_H'], s['ANY2'], label=MODE_KO.get(mode, mode), color=color, alpha=0.8)
 ax.plot([0, 60], [0, 60], color='k', lw=0.5, ls='--')
 ax.axhline(24, color='#eb5757', lw=0.8)
 ax.set_xlim(0, 60); ax.set_ylim(0, 60)
@@ -438,7 +459,7 @@ for ax, c in zip(axes, SIGS8):
     ax.fill_between(q.index, q[0.25], q[0.75], color='#2f5d8a', alpha=0.25, lw=0)
     ax.plot(q.index, q[0.5], color='#2f5d8a')
     ax.axhline(0, color='k', lw=0.5)
-    ax.set_ylabel(c)
+    ax.set_ylabel(ko(c))
 axes[0].set_title('정상 시나리오 변화량 (중앙값, 25~75%) — 배경: 운전조건 0(흰색)·1·2(진한 색)')
 axes[-1].set_xlabel('경과 시간(h)')
 axes[-1].set_xticks(range(0, 73, 12))
@@ -472,12 +493,12 @@ def oriented(df):
 
 normal_h = hr[normal_mask]
 pre36_h = hr[(hr['HTF'] > -36) & (hr['HTF'] <= 0) & (hr['SEG_HOUR'] >= 2) & (hr['MODE'] != 'normal')]
-fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
 for ax, (name, d) in zip(axes, {'정상 구간': normal_h, '고장 전 36시간': pre36_h}.items()):
     cm = oriented(d).corr()
     im = ax.imshow(cm, cmap='RdBu_r', vmin=-1, vmax=1)
-    ax.set_xticks(range(4)); ax.set_xticklabels(cm.columns, rotation=30, ha='right')
-    ax.set_yticks(range(4)); ax.set_yticklabels(cm.columns)
+    ax.set_xticks(range(4)); ax.set_xticklabels([ko(c) for c in cm.columns], rotation=30, ha='right')
+    ax.set_yticks(range(4)); ax.set_yticklabels([ko(c) for c in cm.columns] if ax is axes[0] else [])   # 오른쪽 그림은 왼쪽과 같은 줄이라 라벨 생략
     for i in range(4):
         for j in range(4):
             ax.text(j, i, f'{cm.iloc[i, j]:.2f}', ha='center', va='center')
@@ -535,8 +556,8 @@ for row, (cols, name) in enumerate([(ZC, '세기 (표준화 점수)'), (PC, '비
         bp = ax.boxplot([fp.loc[fp['FAULT_MODE'] == m, c] for m in MAIN_MODES], patch_artist=True, widths=0.6)
         for patch, m in zip(bp['boxes'], MAIN_MODES):
             patch.set_facecolor(MODE_COLOR[m]); patch.set_alpha(0.6)
-        ax.set_xticks(range(1, 4)); ax.set_xticklabels(MAIN_MODES, rotation=15)
-        ax.set_title(c.split('_', 1)[1])
+        ax.set_xticks(range(1, 4)); ax.set_xticklabels([MODE_KO[m] for m in MAIN_MODES], rotation=15)
+        ax.set_title(ko(c))
     axes[row, 0].set_ylabel(name)
 fig.suptitle('원인별 반응 지문 (열화 구간 끝 6시간)', y=1.0)
 fig.tight_layout()
@@ -591,11 +612,11 @@ for ax, r in zip(np.atleast_1d(axes), part.itertuples()):
     keep = (rel > -24) & (rel < 26)
     for sig, color in zip(S4, ['#2f5d8a', '#e07b39', '#4a9b5e', '#9b4a8a']):
         from_first = (g[LVL[sig]] - first_base.loc[r.SCENARIO_ID, LVL[sig]]) * sgn[sig] / p95[sig]
-        ax.plot(rel[keep], from_first[keep], label=sig[:-2], color=color, marker='.', ms=3)
+        ax.plot(rel[keep], from_first[keep], label=ko(sig[:-2]), color=color, marker='.', ms=3)
     ax.axvspan(0, (r.END_DT - r.STRT_DT).total_seconds() / 3600, color='#bdbdbd', alpha=0.5, lw=0)
     ax.axhline(0, color='k', lw=0.5)
     ax.axhline(1, color='#eb5757', lw=0.6)
-    ax.set_ylabel(f'{r.SCENARIO_ID}\n{r.PART_CD}', rotation=0, ha='right')
+    ax.set_ylabel(f'{r.SCENARIO_ID}\n{PART_KO.get(r.PART_CD, r.PART_CD)}', rotation=0, ha='right')
 np.atleast_1d(axes)[0].legend(ncol=4, fontsize=8)
 np.atleast_1d(axes)[0].set_title('부분 정비 전후 신호 (처음 수준 대비, 1 = 정상 범위 폭만큼 이상 방향, 회색: 정비 중)')
 np.atleast_1d(axes)[-1].set_xlabel('부분 정비 시작부터 경과 시간(h)')
@@ -779,7 +800,7 @@ axes[0, 0].axhline(0, color='k', lw=0.5)
 axes[0, 0].set_ylabel('평균 점수의 6시간 기울기 (점수/시간)')
 axes[0, 0].set_title('추세: 고장에 가까울수록 빨리 나빠진다')
 for c, color in zip(vol.columns, ['#2f5d8a', '#e07b39', '#4a9b5e', '#9b4a8a']):
-    axes[0, 1].plot(order, vol[c], marker='o', color=color, label=c.removesuffix('_D'))
+    axes[0, 1].plot(order, vol[c], marker='o', color=color, label=ko(c))
 axes[0, 1].set_ylabel('6시간 이동표준편차 중앙값 (표준화 점수)')
 axes[0, 1].set_title('변동성: 열화가 진행될수록 흔들림도 커진다')
 axes[0, 1].legend(fontsize=8)
@@ -811,4 +832,4 @@ ax.set_title(f'예: {ex} (열화 시작 {r["열화 시작 → 변화 감지(h)"]
 fig.tight_layout()
 save(fig, '21_eda_추세_변동성_변화점.png')
 
-section('완료: 결론과 결정 사항은 reports/연주_조기경보_결과보고서.md 부록 A 참고')
+section('완료: 결론과 결정 사항은 reports/연주_조기경보_결과보고서_상세.md 부록 A 참고')

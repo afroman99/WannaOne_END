@@ -47,7 +47,7 @@ ANSWER_DIRS = {
 }
 
 
-# manifest.json의 값은 받은 데이터에서 온 것이라 파일 경로에 쓰기 전에 형식을 확인한다 (경로 조작 방지, reports/연주_조기경보_결과보고서.md 부록 E-1 7번)
+# manifest.json의 값은 받은 데이터에서 온 것이라 파일 경로에 쓰기 전에 형식을 확인한다 (경로 조작 방지, reports/연주_조기경보_결과보고서_상세.md 부록 E-1 7번)
 _SAFE_ID = re.compile(r'^[a-z0-9][a-z0-9-]{0,63}$')       # 원자료 종류 (출력 파일 이름이 된다)
 _SAFE_SHA = re.compile(r'^[0-9a-f]{64}$')                  # 청크 파일 이름
 _SAFE_SCEN = re.compile(r'^S\d{4}$')

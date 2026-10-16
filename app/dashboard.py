@@ -130,7 +130,7 @@ with st.container(horizontal=True, vertical_alignment='center', gap='medium'):
                                help='앞으로 일어날 실제 고장 시각(정답)을 겹쳐 봅니다. 모델은 이 정보를 보지 않습니다.') and split == 'validation'
         st.caption('독립된 합성 시나리오를 재생합니다 · 실시간 설비 연결 아님')
 # 주소(URL)와 화면 위치를 맞춘다 → 브라우저·마우스의 뒤로 가기/앞으로 가기가 된다
-#   ?view=m (설비관리자) &page=설비 상세|정책·비용|... (관리자 하위 페이지) 또는 equip (작업자 설비 상세) &sid=S0294
+#   ?view=m (설비관리자) &page=설비 상세|정책·비용|... (관리자 하위 페이지) &sid=S0294. 작업자는 내 작업 하나라 주소가 비어 있다
 #   Streamlit은 st.query_params를 바꾸면 기록을 하나 쌓고(pushState), 뒤로 가기로 주소가 바뀌면 그 주소로 다시 실행한다.
 #   그래서 주소가 '우리가 마지막으로 쓴 주소'와 다를 때만(뒤로·앞으로 가기, 주소 직접 입력) 주소 → 화면으로 옮기고,
 #   나머지 경우는 맨 아래 sync_url()이 화면 → 주소로 쓴다. 기본 화면(작업자·내 작업)은 주소에 아무것도 넣지 않는다.
@@ -146,7 +146,7 @@ def apply_url():
     role_ = MANAGER if q.get('view') == 'm' else WORKER
     page_ = q.get('page')
     sid_ = q.get('sid') if re.fullmatch(r'S\d{4}', q.get('sid', '')) else None
-    before = (st.session_state.get('role'), st.session_state.get('msub'), st.session_state.get('wview'))
+    before = (st.session_state.get('role'), st.session_state.get('msub'))
     st.session_state['role'] = role_
     if role_ == MANAGER:
         if page_ in MANAGER_TABS:
@@ -155,7 +155,6 @@ def apply_url():
             st.session_state.pop('msub', None)
     else:
         st.session_state.pop('msub', None)
-        st.session_state['wview'] = '설비 상세' if page_ == 'equip' else '내 작업'
     if sid_:
         st.session_state['sid'] = sid_
         if role_ == MANAGER and page_ not in MANAGER_TABS:
@@ -164,7 +163,7 @@ def apply_url():
     elif role_ == MANAGER and page_ not in MANAGER_TABS:
         st.session_state.pop('nav_pick', None)
         st.session_state.pop('decision_sid', None)
-    if before != (st.session_state.get('role'), st.session_state.get('msub'), st.session_state.get('wview')):
+    if before != (st.session_state.get('role'), st.session_state.get('msub')):
         st.session_state['scroll_top'] = True
 
 
@@ -179,10 +178,6 @@ def sync_url():
                 q['sid'] = st.session_state['sid']
         elif st.session_state.get('nav_pick') and st.session_state.get('decision_sid'):
             q['sid'] = st.session_state['decision_sid']
-    elif st.session_state.get('wview') == '설비 상세':
-        q['page'] = 'equip'
-        if st.session_state.get('sid'):
-            q['sid'] = st.session_state['sid']
     if q != url_state():
         st.query_params.from_dict(q)
     st.session_state['_nav_last'] = q
@@ -202,7 +197,7 @@ def close_sub():
         st.session_state['scroll_top'] = True
 
 
-role = st.segmented_control('보는 사람', [WORKER, MANAGER], key='role', required=True, label_visibility='collapsed', on_change=close_sub,
+role = st.segmented_control('보는 사람', [MANAGER, WORKER], key='role', required=True, label_visibility='collapsed', on_change=close_sub,
                             format_func=lambda r: f'{ICONS[r]} {ROLE_LABEL[r]}')
 
 pts, hr, contrib, contrib_unit, mnt = get_data(split)
@@ -519,12 +514,9 @@ def open_sub(key, sid=None):
 
 
 def go_detail(sid):
-    """버튼에서 '설비 상세' 화면으로 (콜백): 작업자는 '설비 상세' 보기, 설비관리자는 아래 탭"""
+    """버튼에서 설비관리자의 '설비 상세' 하위 페이지로 (콜백)"""
     st.session_state['sid'] = sid
-    if st.session_state.get('role') == WORKER:
-        st.session_state['wview'] = '설비 상세'
-    else:
-        st.session_state['msub'] = '설비 상세'
+    st.session_state['msub'] = '설비 상세'
 
 
 SHOW_SUBPAGE_LIST = False   # 설비관리자 ③ 하위 페이지 목록 (2026-10-15 사용자 요청으로 숨김. 설비 페이지는 비용 비교 제목 옆 버튼으로 들어감)
@@ -696,116 +688,107 @@ def task_line(r):
 
 page = None
 if role == WORKER:
-    st.session_state.setdefault('wview', '내 작업')
-    wview = st.segmented_control('작업자 화면', ['내 작업', '설비 상세'], key='wview', required=True,
-                                 label_visibility='collapsed', format_func=lambda x: f'{ICONS[x]} {x}')
-    page = '설비 상세' if wview == '설비 상세' else None
-    if wview == '내 작업':
-        if not bundle.get('dss'):
-            st.warning('이 모델 파일에는 정비 계획 정보가 없습니다. python analysis/05_predict_test.py 로 다시 만드세요.')
-            st.stop()
-        A = assumptions()
-        t = status_table()
-        W = work_plan(A, t)
-        dec, cfg, costs = W['dec'], W['cfg'], W['costs']
-        tf = TASKS.frame(split, now)
-        st.session_state.setdefault('my_team', list(tasks.TEAMS)[0])
-        with st.container(horizontal=True, vertical_alignment='center'):
-            st.subheader('내 작업', icon=':material/checklist:')
-            st.space('stretch')
-            team = st.segmented_control('내 팀', list(tasks.TEAMS), key='my_team', required=True, label_visibility='collapsed',
-                                        help='팀원: ' + ' / '.join(f'{k} ' + '·'.join(v) for k, v in tasks.TEAMS.items()))
-        mine = tf[tf['team'] == team]
-        open_ = mine[mine['상태'] != '완료']
-        open_ = open_.assign(_r=(open_['상태'] != '진행 중').astype(int)).sort_values('_r', kind='stable')
-        dec_i = dec.set_index('설비 (시나리오)') if len(dec) else pd.DataFrame()
-        busy = TASKS.blocked_sids(split, now)
-        js = LOG.job_state(split, now, MNT_START)
-        done_ = {x for x, v in js.items() if v == '작업 완료'}     # 이번 운전 구간에서 이미 교체를 마친 설비
-        urgent_un = [x for x in dec_i.index if dec_i.loc[x, '제약'].startswith('즉시') and x not in busy | done_] if len(dec_i) else []
-        ft = st.session_state.get('focus_tid')
-        focus = open_[open_['id'] == ft].iloc[0] if ft in set(open_['id']) else (open_.iloc[0] if len(open_) else None)
+    # 작업자는 내 작업만 본다 (2026-10-16: 설비 상세는 설비관리자의 하위 페이지로만 연다)
+    if not bundle.get('dss'):
+        st.warning('이 모델 파일에는 정비 계획 정보가 없습니다. python analysis/05_predict_test.py 로 다시 만드세요.')
+        st.stop()
+    A = assumptions()
+    t = status_table()
+    W = work_plan(A, t)
+    dec, cfg, costs = W['dec'], W['cfg'], W['costs']
+    tf = TASKS.frame(split, now)
+    st.session_state.setdefault('my_team', list(tasks.TEAMS)[0])
+    with st.container(horizontal=True, vertical_alignment='center'):
+        st.subheader('내 작업', icon=':material/checklist:')
+        st.space('stretch')
+        team = st.segmented_control('내 팀', list(tasks.TEAMS), key='my_team', required=True, label_visibility='collapsed',
+                                    help='팀원: ' + ' / '.join(f'{k} ' + '·'.join(v) for k, v in tasks.TEAMS.items()))
+    mine = tf[tf['team'] == team]
+    open_ = mine[mine['상태'] != '완료']
+    open_ = open_.assign(_r=(open_['상태'] != '진행 중').astype(int)).sort_values('_r', kind='stable')
+    dec_i = dec.set_index('설비 (시나리오)') if len(dec) else pd.DataFrame()
+    busy = TASKS.blocked_sids(split, now)
+    js = LOG.job_state(split, now, MNT_START)
+    done_ = {x for x, v in js.items() if v == '작업 완료'}     # 이번 운전 구간에서 이미 교체를 마친 설비
+    urgent_un = [x for x in dec_i.index if dec_i.loc[x, '제약'].startswith('즉시') and x not in busy | done_] if len(dec_i) else []
+    ft = st.session_state.get('focus_tid')
+    focus = open_[open_['id'] == ft].iloc[0] if ft in set(open_['id']) else (open_.iloc[0] if len(open_) else None)
 
-        with st.container(border=True):
-            if focus is not None:
-                sid = focus['sid']
-                info = dec_i.loc[sid] if sid in dec_i.index else None
-                plan_part = info['_e'].get('plan_part') if info is not None else None
-                need = PARTS if not str(focus['option']).startswith('다음 정기') else [q for q in PARTS if q != plan_part]
-                miss_ = missing_parts(W['stock'][sid], need)
-                st.caption(f'지금 할 일 · {team} · 작업 #{int(focus["id"])}')
-                st.markdown(f'### {focus["title"] if str(focus["title"]).startswith(sid) else sid + " — " + focus["title"]}')
-                st.markdown(' '.join(x for x in [
-                    PRIORITY_BADGE.get(focus['priority'], ''), TASK_BADGE.get(focus['상태'], ''),
-                    ':red-badge[:material/schedule: 예정 시각 지남]' if focus['구분'] == '지연' else '',
-                    (':red-badge[:material/emergency: 즉시 조치]' if info is not None and info['제약'].startswith('즉시') else ''),
-                    (RISK_BADGE.get(risk_word(info['완료 전 고장 확률'], cfg.safety_max), '') if info is not None else ''),
-                    (f':orange-badge[:material/inventory_2: {", ".join(PART_NAMES[q] for q in miss_)} 재고 없음 · 긴급 조달 '
-                     f'{cfg.parts.rush_h:.0f}시간]' if miss_ else ':green-badge[:material/inventory_2: 부품 준비됨]')] if x))
-                st.markdown(f'**예정 {focus["due_h"]:.0f}시간 → {focus["due_h"] + costs.replace_h:.0f}시간** · {focus["reason"]}')
-                with st.expander('점검 가이드', icon=':material/fact_check:', expanded=focus['상태'] == '진행 중'):
-                    st.markdown(focus['guide'].replace('\n', '  \n'))
-                    st.caption('현장 안전 규정과 작업 허가가 우선입니다.')
-                if focus['상태'] == '대기':
-                    with st.container(horizontal=True):
-                        st.button('작업 시작', icon=':material/play_arrow:', type='primary', on_click=start_task,
-                                  args=(int(focus['id']), sid))
-                        st.button('설비 보기', icon=':material/monitoring:', on_click=go_detail, args=(sid,))
-                else:
-                    st.markdown('**완료 보고** · 결과와 수행 내용을 남겨야 완료됩니다')
-                    with st.form(f'complete_{int(focus["id"])}', border=False):
-                        c1, c2, c3 = st.columns([1.2, 1, 1])
-                        outcome = c1.segmented_control('작업 결과', tasks.OUTCOMES, default='이상 발견', required=True)
-                        judged = c2.segmented_control('점검으로 판단한 부품', tasks.JUDGED, default='구분 못함', required=True,
-                                                      format_func=lambda x: PART_NAMES.get(x, x))
-                        confirmed = c3.segmented_control('교체 뒤 확인된 원인 부품', tasks.CONFIRMED, default='아직 모름', required=True,
-                                                         format_func=lambda x: PART_NAMES.get(x, x))
-                        details = st.text_area('수행 내용 (필수)', max_chars=tasks.LIMITS['details'],
-                                               placeholder='예: 진동장치 베어링 마모 확인, 두 부품 교체 후 신호 정상')
-                        if st.form_submit_button('완료 보고', icon=':material/task_alt:', type='primary'):
-                            try:
-                                done = TASKS.complete(int(focus['id']), now, outcome, details, judged, confirmed)
-                            except ValueError as e:
-                                st.error(str(e))
-                            else:
-                                if done:
-                                    LOG.record('작업 완료', split, sid, now, WORKER, note=details)
-                                    LOG.record('점검 결과', split, sid, now, WORKER, judged=judged, confirmed=confirmed, note=outcome)
-                                    st.session_state.pop('focus_tid', None)
-                                    st.toast(f'{sid}: 완료 보고', icon=':material/task_alt:')
-                                    st.rerun()
-                                else:
-                                    st.warning('이미 완료된 작업입니다.')
-                    st.button('설비 보기', icon=':material/monitoring:', on_click=go_detail, args=(sid,))
-            elif urgent_un:
-                sid = urgent_un[0]
-                st.caption('지금 할 일 · 배정 전 즉시 조치')
-                st.markdown(f'### {sid} — 즉시 조치: 두 부품 교체')
-                st.markdown(':red-badge[:material/emergency: 지금 교체해도 완료 전 고장 확률이 안전 기준 초과] :gray-badge[아직 배정 전]')
-                st.markdown('안전이 먼저입니다. 설비관리자의 배정을 기다리지 않고 바로 시작할 수 있습니다.')
-                with st.container(horizontal=True):
-                    st.button(f'{team}이 바로 시작', icon=':material/play_arrow:', type='primary', on_click=urgent_start,
-                              args=(sid, team, dec_i.loc[sid, '추천']))
-                    st.button('설비 보기', icon=':material/monitoring:', on_click=go_detail, args=(sid,))
+    with st.container(border=True):
+        if focus is not None:
+            sid = focus['sid']
+            info = dec_i.loc[sid] if sid in dec_i.index else None
+            plan_part = info['_e'].get('plan_part') if info is not None else None
+            need = PARTS if not str(focus['option']).startswith('다음 정기') else [q for q in PARTS if q != plan_part]
+            miss_ = missing_parts(W['stock'][sid], need)
+            st.caption(f'지금 할 일 · {team} · 작업 #{int(focus["id"])}')
+            st.markdown(f'### {focus["title"] if str(focus["title"]).startswith(sid) else sid + " — " + focus["title"]}')
+            st.markdown(' '.join(x for x in [
+                PRIORITY_BADGE.get(focus['priority'], ''), TASK_BADGE.get(focus['상태'], ''),
+                ':red-badge[:material/schedule: 예정 시각 지남]' if focus['구분'] == '지연' else '',
+                (':red-badge[:material/emergency: 즉시 조치]' if info is not None and info['제약'].startswith('즉시') else ''),
+                (RISK_BADGE.get(risk_word(info['완료 전 고장 확률'], cfg.safety_max), '') if info is not None else ''),
+                (f':orange-badge[:material/inventory_2: {", ".join(PART_NAMES[q] for q in miss_)} 재고 없음 · 긴급 조달 '
+                 f'{cfg.parts.rush_h:.0f}시간]' if miss_ else ':green-badge[:material/inventory_2: 부품 준비됨]')] if x))
+            st.markdown(f'**예정 {focus["due_h"]:.0f}시간 → {focus["due_h"] + costs.replace_h:.0f}시간** · {focus["reason"]}')
+            with st.expander('점검 가이드', icon=':material/fact_check:', expanded=focus['상태'] == '진행 중'):
+                st.markdown(focus['guide'].replace('\n', '  \n'))
+                st.caption('현장 안전 규정과 작업 허가가 우선입니다.')
+            if focus['상태'] == '대기':
+                st.button('작업 시작', icon=':material/play_arrow:', type='primary', on_click=start_task,
+                          args=(int(focus['id']), sid))
             else:
-                st.markdown('##### :material/check_circle: 지금 할 작업이 없습니다')
-                st.caption('설비관리자가 배정하면 여기에 나타납니다.')
-        if focus is not None and urgent_un:
-            st.markdown(f':red-badge[:material/emergency: 배정 전 즉시 조치 {len(urgent_un)}대] {", ".join(urgent_un)} — '
-                        '설비관리자에게 알리세요')
+                st.markdown('**완료 보고** · 결과와 수행 내용을 남겨야 완료됩니다')
+                with st.form(f'complete_{int(focus["id"])}', border=False):
+                    c1, c2, c3 = st.columns([1.2, 1, 1])
+                    outcome = c1.segmented_control('작업 결과', tasks.OUTCOMES, default='이상 발견', required=True)
+                    judged = c2.segmented_control('점검으로 판단한 부품', tasks.JUDGED, default='구분 못함', required=True,
+                                                  format_func=lambda x: PART_NAMES.get(x, x))
+                    confirmed = c3.segmented_control('교체 뒤 확인된 원인 부품', tasks.CONFIRMED, default='아직 모름', required=True,
+                                                     format_func=lambda x: PART_NAMES.get(x, x))
+                    details = st.text_area('수행 내용 (필수)', max_chars=tasks.LIMITS['details'],
+                                           placeholder='예: 진동장치 베어링 마모 확인, 두 부품 교체 후 신호 정상')
+                    if st.form_submit_button('완료 보고', icon=':material/task_alt:', type='primary'):
+                        try:
+                            done = TASKS.complete(int(focus['id']), now, outcome, details, judged, confirmed)
+                        except ValueError as e:
+                            st.error(str(e))
+                        else:
+                            if done:
+                                LOG.record('작업 완료', split, sid, now, WORKER, note=details)
+                                LOG.record('점검 결과', split, sid, now, WORKER, judged=judged, confirmed=confirmed, note=outcome)
+                                st.session_state.pop('focus_tid', None)
+                                st.toast(f'{sid}: 완료 보고', icon=':material/task_alt:')
+                                st.rerun()
+                            else:
+                                st.warning('이미 완료된 작업입니다.')
+        elif urgent_un:
+            sid = urgent_un[0]
+            st.caption('지금 할 일 · 배정 전 즉시 조치')
+            st.markdown(f'### {sid} — 즉시 조치: 두 부품 교체')
+            st.markdown(':red-badge[:material/emergency: 지금 교체해도 완료 전 고장 확률이 안전 기준 초과] :gray-badge[아직 배정 전]')
+            st.markdown('안전이 먼저입니다. 설비관리자의 배정을 기다리지 않고 바로 시작할 수 있습니다.')
+            st.button(f'{team}이 바로 시작', icon=':material/play_arrow:', type='primary', on_click=urgent_start,
+                      args=(sid, team, dec_i.loc[sid, '추천']))
+        else:
+            st.markdown('##### :material/check_circle: 지금 할 작업이 없습니다')
+            st.caption('설비관리자가 배정하면 여기에 나타납니다.')
+    if focus is not None and urgent_un:
+        st.markdown(f':red-badge[:material/emergency: 배정 전 즉시 조치 {len(urgent_un)}대] {", ".join(urgent_un)} — '
+                    '설비관리자에게 알리세요')
 
-        cnt = mine['구분'].value_counts()
-        t1, t2, t3, t4 = st.tabs([f'지금 {cnt.get("지금", 0)}', f'지연 {cnt.get("지연", 0)}', f'예정 {cnt.get("예정", 0)}',
-                                  f'완료·이력 {cnt.get("완료", 0)}'])
-        for tab, key in [(t1, '지금'), (t2, '지연'), (t3, '예정'), (t4, '완료')]:
-            with tab:
-                rows = mine[mine['구분'] == key]
-                if rows.empty:
-                    st.caption('없습니다.')
-                for _, r in rows.iterrows():
-                    task_line(r)
-        st.caption('재생 시각 기준: 지금 = 예정 시각이 됨 · 지연 = 예정 시각이 지났는데 시작 전 · 예정 = 아직 · '
-                   + ('기록은 이 브라우저 세션에만 남습니다(공개 화면).' if CLOUD else '기록은 이 컴퓨터의 actions/tasks.sqlite3에 남습니다.'))
+    cnt = mine['구분'].value_counts()
+    t1, t2, t3, t4 = st.tabs([f'지금 {cnt.get("지금", 0)}', f'지연 {cnt.get("지연", 0)}', f'예정 {cnt.get("예정", 0)}',
+                              f'완료·이력 {cnt.get("완료", 0)}'])
+    for tab, key in [(t1, '지금'), (t2, '지연'), (t3, '예정'), (t4, '완료')]:
+        with tab:
+            rows = mine[mine['구분'] == key]
+            if rows.empty:
+                st.caption('없습니다.')
+            for _, r in rows.iterrows():
+                task_line(r)
+    st.caption('재생 시각 기준: 지금 = 예정 시각이 됨 · 지연 = 예정 시각이 지났는데 시작 전 · 예정 = 아직 · '
+               + ('기록은 이 브라우저 세션에만 남습니다(공개 화면).' if CLOUD else '기록은 이 컴퓨터의 actions/tasks.sqlite3에 남습니다.'))
 
 
 # 1. 설비관리자: 배정할 경보 하나 → ① 대상·비용·배정 ② 진행 현황, ③ 아래 탭
@@ -912,7 +895,9 @@ else:
             with st.container(horizontal=True, vertical_alignment='center'):
                 st.markdown(f'##### {sid} · 정비 비용 비교')
                 st.space('stretch')
-                st.button(f'{sid} 페이지', icon=':material/description:', type='tertiary', key='open_sid_page',
+                # 하이퍼링크처럼 보이게 (파란 글자 + 밑줄, 2026-10-16). 주소 링크 대신 버튼이라 시연 설정·기록이 그대로 남는다
+                st.html('<style>.st-key-open_sid_page button p { text-decoration: underline; text-underline-offset: 3px; }</style>')
+                st.button(f':blue[{sid} 페이지]', icon=':material/open_in_new:', type='tertiary', key='open_sid_page',
                           on_click=open_sub, args=('설비 상세', sid), help='위험 확률·네 신호·정비 이력을 하위 페이지로 엽니다')
             st.caption(f'상태: {sstage}' + (f' · 24시간 고장 위험 {srow["위험 확률"]:.1%}' if pd.notna(srow['위험 확률']) else ''))
             # 이미 손댄 설비는 먼저 그 사실을 보여 준다 (재생 데이터에는 우리 교체가 반영되지 않아 경보가 그대로 남기 때문)

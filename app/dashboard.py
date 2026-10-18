@@ -421,7 +421,8 @@ def assumptions():
     base, bc = D['config'], D['config'].costs
     bp = getattr(base, 'parts', PartsPolicy())
     default = {'safety': float(base.safety_max), 'prep': int(base.prep_h), 'crew_wait': int(base.crew_wait_h),
-               'n_crews': 2, 'crew_day_h': 8, 'down_h': float(bc.downtime_h), 'penalty': float(bc.failure_penalty),
+               'n_crews': 2, 'crew_day_h': 8,   # 정비는 상주 근무(주 5일, 하루 8시간)라 팀당 하루 8공수 (팀 결정 2026-10-15, 2026-10-16 확인)
+               'down_h': float(bc.downtime_h), 'penalty': float(bc.failure_penalty),
                'p_other': float(base.p_other_needed), 'max_wait': int(base.max_wait_h), 'delay_h': 0,
                'delay_rate': float(bc.downtime_h),
                # 비용 기준: 서비스 화면은 현장 가정(만 원, 정건우 현장 경험 2026-10-15) 하나로 통일 (2026-10-15 사용자 요청).
@@ -1030,10 +1031,13 @@ else:
                 # 계획 정비 막대는 늘 보여 준다: 엔진 조건(최대 대기·부품·정비팀) 밖이거나 정기 교체 계획이 없으면 비교용으로만 계산
                 plan_note = ''
                 if all(o['선택지'].startswith('지금') for o in e['opts']):
-                    loose = replace(cfg, max_wait_h=1e9, prep_h=0.0, crew_wait_h=0.0)
+                    # 정비팀 차례 대기는 계획 정비에도 똑같이 건다 (2026-10-16: 대기 없이 비교하면 '나중에 하는 게 더 빨리 끝나는' 비교가 됨)
+                    crew_h = cfg.crew_wait_h + r_['_slot']
+                    loose = replace(cfg, max_wait_h=1e9, prep_h=0.0, crew_wait_h=crew_h)
                     has_plan = pd.notna(e['wait_h'])
-                    # 정기 교체가 있으면 그것으로, 없거나 (부품이 모자라) 계산이 안 되면 N시간 뒤 정지를 가정한다
-                    for d_ in ((None,) if has_plan else ()) + (PLAN_GUESS_H, 2 * PLAN_GUESS_H):
+                    # 정기 교체가 있으면 그것으로, 없거나 (부품이 모자라) 계산이 안 되면 N시간 뒤 정지를 가정한다 (정비팀 차례 뒤로)
+                    guesses = tuple(d for d in (PLAN_GUESS_H, 2 * PLAN_GUESS_H) if d > crew_h) or (int(np.ceil(crew_h)) + PLAN_GUESS_H,)
+                    for d_ in ((None,) if has_plan else ()) + guesses:
                         po_ = [o for o in options(e['wait_h'] if d_ is None else np.nan, W['curve'], loose, e['elapsed'], delay_h=d_,
                                                   stock=W['stock'][sid], plan_part=e['plan_part']) if not o['선택지'].startswith('지금')]
                         if po_:
@@ -1342,7 +1346,7 @@ elif page == '의사결정':
         A['n_crews'] = a4.number_input('동시에 교체할 수 있는 정비팀 수', 1, 10, A['n_crews'], 1,
                                        help='경보 설비가 이보다 많으면 위험한 순서대로 차례를 기다립니다.')
         A['crew_day_h'] = a4.number_input('정비팀 1팀의 하루 작업 한도 (공수, 시간)', 4, 24, A['crew_day_h'], 1,
-                                          help='팀 결정(2026-10-15): 1팀당 하루 최대 8공수. 교체 1번이 4시간이라 팀당 하루 2대까지이고, 넘으면 다음 날로 넘어갑니다.')
+                                          help='기본 8공수(상주 근무: 주 5일, 하루 8시간). 교체 1번이 4시간이라 팀당 하루 2대까지이고, 넘으면 다음 날로 넘어갑니다. 연장·교대 근무면 늘리세요.')
         if FIELD:
             st.markdown('**비용 (만 원, 현장 가정)**')
             f1, f2, f3, f4 = st.columns(4)

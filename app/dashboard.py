@@ -176,6 +176,32 @@ STORE_NOTE = ('기록은 공용 DB에 남아 설비관리자·작업자가 같�
 st.session_state['_fresh'] = True   # 자동 갱신(맨 아래 watch_changes)에 '방금 전체를 다시 그렸다'고 알린다
 
 
+def clock(h):
+    """재생 시각(시나리오 시작 후 h)을 사람 말로: 25 → '2일차 01:00' (2026-10-19). 합성 데이터라 실제 날짜 대신 일차로 쓴다"""
+    if h is None or pd.isna(h):
+        return '—'
+    m = int(round(float(h) * 60))
+    d, m = divmod(m, 24 * 60)
+    return f'{d + 1}일차 {m // 60:02d}:{m % 60:02d}'
+
+
+def hour_pick(label, lo, hi, default, key):
+    """보고 시각 고르기: [일차] + [시] 두 칸 (폼 안에서도 쓰도록 범위 검사는 pick_ok로 따로). 반환: 고른 h (정수)"""
+    c1, c2 = st.columns(2)
+    d = c1.selectbox(f'{label} · 일차', list(range(int(lo) // 24 + 1, int(hi) // 24 + 2)), index=int(default) // 24 - int(lo) // 24,
+                     format_func=lambda x: f'{x}일차', key=f'{key}_{int(hi)}_d')   # 지금 시각이 바뀌면 기본값도 새로
+    hh = c2.selectbox('시', list(range(24)), index=int(default) % 24, format_func=lambda x: f'{x:02d}:00', key=f'{key}_{int(hi)}_h')
+    return (d - 1) * 24 + hh
+
+
+def pick_ok(h, lo, hi):
+    """고른 보고 시각이 범위(작업 시작 ~ 지금) 안인가. 아니면 화면에 알리고 False"""
+    if lo <= h <= hi:
+        return True
+    st.error(f'보고 시각은 {clock(lo)} ~ {clock(hi)} 사이로 고르세요. (고른 시각 {clock(h)})', icon=':material/schedule:')
+    return False
+
+
 # 화면 위: CAST-PdM 머리말 · 시연 설정 · 보는 사람 (팀원 설계 화면과 합침 2026-10-15)
 #   작업자      현장: 내 팀의 지금 할 일 하나(시작 → 완료 보고), 날짜 대신 재생 시각 기준 지금·지연·예정·완료. 비용 없음
 #   설비관리자  의사결정: 배정할 경보 하나(→ ①로 이동), ① 대상·비용·배정 ② 진행 현황 ③ 하위 페이지(근거·정책·모델)
@@ -212,13 +238,15 @@ with st.container(horizontal=True, vertical_alignment='center', gap='medium'):
     st.caption('정비 의사결정 지원 솔루션 · 시연')
     st.space('stretch')
     # 시연 설정: 실제 운영에는 없는 재생용 값이라 한 곳에 접어 둔다 (지금 값은 버튼 이름에 보인다)
-    with st.popover(f'{st.session_state["split_label"].split(" ")[0]} · {st.session_state["now"]}시간',
+    with st.popover(f'{st.session_state["split_label"].split(" ")[0]} · {clock(st.session_state["now"])}',
                     icon=':material/tune:', help='시연 설정: 데이터 세트와 지금 시각'):
         split_label = st.selectbox('데이터 세트', list(SPLITS), key='split_label', on_change=save_clock, disabled=not CAN_SET_CLOCK,
                                    help='테스트: 정답이 없는 실제 운영과 같은 상황 · 검증: 정답이 있어 실제 고장과 비교할 수 있음')
         split = SPLITS[split_label]
-        now = st.slider('지금 시각 (시나리오 시작 후 h)', 0, 72, step=1, key='now', on_change=save_clock, disabled=not CAN_SET_CLOCK,
-                        help='이 시각까지의 데이터만으로 본 상태를 보여 줍니다. 왼쪽으로 옮기면 과거로 돌아가 재생할 수 있습니다.')
+        now = st.select_slider('지금 시각', list(range(73)), key='now', on_change=save_clock, disabled=not CAN_SET_CLOCK,
+                               format_func=clock,
+                               help='이 시각까지의 데이터만으로 본 상태를 보여 줍니다. 왼쪽으로 옮기면 과거로 돌아가 재생할 수 있습니다. '
+                                    '1일차 00:00 = 시나리오 시작 (합성 데이터라 실제 날짜 대신 일차로 표시)')
         show_truth = st.toggle('정답 보기 (검증 세트)', key='truth', disabled=split != 'validation',
                                help='앞으로 일어날 실제 고장 시각(정답)을 겹쳐 봅니다. 모델은 이 정보를 보지 않습니다.') and split == 'validation'
         st.caption('독립된 합성 시나리오를 재생합니다 · 실시간 설비 연결 아님'
@@ -332,7 +360,7 @@ hr_now = hr[hr['DONE_H'] <= now]
 mnt_now = mnt[mnt['START_H'] <= now].assign(
     END_SHOWN=lambda d: d['END_H'].clip(upper=now),
     시작=lambda d: d['START_H'].map(lambda x: f'{x:.1f}h'),
-    종료=lambda d: d['END_H'].map(lambda x: f'{x:.1f}h' if x <= now else '진행 중 (종료 미확정)'))   # 미래의 종료 시각은 보여 주지 않는다
+    종료=lambda d: d['END_H'].map(lambda x: clock(x) if x <= now else '진행 중 (종료 미확정)'))   # 미래의 종료 시각은 보여 주지 않는다
 last_mnt_start = mnt_now.groupby('SCENARIO_ID')['START_H'].max()     # 지금까지 마지막으로 시작된 정비
 
 
@@ -495,7 +523,7 @@ def procurement(cfg, stock, ids):
         short = [q for q in missing_parts(st_, PARTS) if q not in coming]
         rows.append({'설비': sid, '재고': stock_text(st_),
                      '발주': ('발주 필요: ' + ', '.join(PART_NAMES[q] for q in short) + f' (정상 {cfg.parts.lead_h:.0f}시간)') if short else
-                            ('도착 예정: ' + ', '.join(f'{PART_NAMES[q]} {a:.0f}h' for q, a, _ in trans.get(sid, []))) if coming else '준비됨',
+                            ('도착 예정: ' + ', '.join(f'{PART_NAMES[q]} {clock(a)}' for q, a, _ in trans.get(sid, []))) if coming else '준비됨',
                      '_short': short})
     return pd.DataFrame(rows, columns=['설비', '재고', '발주', '_short'])
 
@@ -693,7 +721,7 @@ def assign_box(sid, srow, sstage, job_, dec_i, W, cfg, load):
     """비용 비교 바로 아래의 실행 칸: 팀 고르고 배정(주 버튼 하나) · 보류 · 부품 발주. 세부 내용은 접어 둔다"""
     existing = TASKS.blocking(split, sid, now)
     if existing:
-        when = '' if existing['created_h'] <= now else f' (재생 시각 {existing["created_h"]:.0f}시간에 만든 작업)'
+        when = '' if existing['created_h'] <= now else f' ({clock(existing["created_h"])}에 만든 작업)'
         st.warning(f'이미 작업 #{int(existing["id"])} · {existing["title"]} ({existing["team"]}){when}이 있어 다시 배정하지 않습니다. '
                    '아래 ② 진행 현황에서 확인하세요.', icon=':material/block:')
         return
@@ -712,8 +740,9 @@ def assign_box(sid, srow, sstage, job_, dec_i, W, cfg, load):
             title_f = st.text_input('작업명', value=f'{sid} {rec}', max_chars=tasks.LIMITS['title'])
             d1, d2 = st.columns(2)
             prio_f = d1.selectbox('우선순위', tasks.PRIORITIES, index=0 if urgent else ({'경보': 1, '주의': 1}.get(sstage, 2)))
-            due_f = d2.number_input('시작 예정 (h)', 0.0, 240.0,
-                                    min(240.0, float(now + max(0.0, dec_i.loc[sid, '_start']))) if alarm else float(now), 1.0, format='%.0f')
+            # 즉시 조치는 정비팀 차례를 기다리지 않고 바로 시작한다 (작업자 화면의 '바로 시작'과 같은 규칙, 2026-10-19)
+            due0 = min(240, int(round(now + max(0.0, dec_i.loc[sid, '_start'])))) if alarm and not urgent else int(now)
+            due_f = d2.selectbox('시작 예정', list(range(241)), index=due0, format_func=clock)
             guide_f = st.text_area('점검 가이드', value=tasks.DEFAULT_GUIDE, height=140, max_chars=tasks.LIMITS['guide'])
             reason_f = st.text_area('추천 이유', max_chars=tasks.LIMITS['reason'],
                                     value=f'{sid} · {srow["상태"]} · 추천 {rec}' + (f' · 24시간 안 고장 확률 {srow["위험 확률"]:.2f}'
@@ -731,7 +760,7 @@ def assign_box(sid, srow, sstage, job_, dec_i, W, cfg, load):
             for part in PARTS:
                 empty = W['stock'][sid][part] < 1
                 st.button(f'{PART_NAMES[part]} ' + ('조달 중' if part in coming_ else
-                                                    f'긴급 발주 ({cfg.parts.rush_h:.0f}h)' if empty else f'보충 발주 ({cfg.parts.lead_h:.0f}h)'),
+                                                    f'긴급 발주 ({cfg.parts.rush_h:.0f}시간)' if empty else f'보충 발주 ({cfg.parts.lead_h:.0f}시간)'),
                           icon=':material/local_shipping:', key=f'order_{part}', disabled=part in coming_, on_click=act,
                           args=('부품 발주', sid, MANAGER), kwargs={'part': part, 'option': '긴급' if empty else '정상'})
 
@@ -758,8 +787,8 @@ def task_line(r):
         st.markdown(f'**#{int(r["id"])} {r["title"] if str(r["title"]).startswith(r["sid"]) else r["sid"] + " — " + r["title"]}**  \n'
                     + ' '.join([PRIORITY_BADGE.get(r['priority'], ''), TASK_BADGE.get(r['상태'], ''),
                                 ':red-badge[지연]' if r['구분'] == '지연' else '', f':gray-badge[{r["team"]}]']))
-        st.caption(f'예정 {r["due_h"]:.0f}시간 · 배정 {r["created_h"]:.0f}시간'
-                   + (f' · 완료 {r["completed_h"]:.0f}시간' if pd.notna(r['completed_h']) and r['상태'] == '완료' else '')
+        st.caption(f'예정 {clock(r["due_h"])} · 배정 {clock(r["created_h"])}'
+                   + (f' · 완료 {clock(r["completed_h"])}' if pd.notna(r['completed_h']) and r['상태'] == '완료' else '')
                    + (f' · {r["reason"]}' if r['reason'] else ''))
         if r['상태'] == '완료':
             st.markdown(f'완료 보고: **{r["outcome"]}** · 점검 판단 {PART_NAMES.get(r["judged"], r["judged"])} · '
@@ -843,7 +872,7 @@ if role == WORKER:
                 (RISK_BADGE.get(risk_word(info['완료 전 고장 확률'], cfg.safety_max), '') if info is not None else ''),
                 (f':orange-badge[:material/inventory_2: {", ".join(PART_NAMES[q] for q in miss_)} 재고 없음 · 긴급 조달 '
                  f'{cfg.parts.rush_h:.0f}시간]' if miss_ else ':green-badge[:material/inventory_2: 부품 준비됨]')] if x))
-            st.markdown(f'**예정 {focus["due_h"]:.0f}시간 → {focus["due_h"] + costs.replace_h:.0f}시간** · {focus["reason"]}')
+            st.markdown(f'**예정 {clock(focus["due_h"])} → {clock(focus["due_h"] + costs.replace_h)}** · {focus["reason"]}')
             with st.expander('점검 가이드', icon=':material/fact_check:', expanded=focus['상태'] == '진행 중'):
                 st.markdown(focus['guide'].replace('\n', '  \n'))
                 st.caption('현장 안전 규정과 작업 허가가 우선입니다.')
@@ -861,15 +890,18 @@ if role == WORKER:
                                                      format_func=lambda x: PART_NAMES.get(x, x))
                     details = st.text_area('수행 내용 (필수)', max_chars=tasks.LIMITS['details'],
                                            placeholder='예: 진동장치 베어링 마모 확인, 두 부품 교체 후 신호 정상')
-                    if st.form_submit_button('완료 보고', icon=':material/task_alt:', type='primary'):
+                    # 완료 시각: 작업 시작 ~ 지금 사이에서 고른다 (기본 지금). 재고·점검 집계가 이 시각을 쓴다
+                    lo_ = min(int(np.ceil(focus['started_h'] if pd.notna(focus['started_h']) else focus['created_h'])), int(now))
+                    done_h = hour_pick('완료 시각', lo_, now, now, f'done_at_{int(focus["id"])}')
+                    if st.form_submit_button('완료 보고', icon=':material/task_alt:', type='primary') and pick_ok(done_h, lo_, now):
                         try:
-                            done = TASKS.complete(int(focus['id']), now, outcome, details, judged, confirmed)
+                            done = TASKS.complete(int(focus['id']), done_h, outcome, details, judged, confirmed)
                         except ValueError as e:
                             st.error(str(e))
                         else:
                             if done:
-                                LOG.record('작업 완료', split, sid, now, WORKER, note=details)
-                                LOG.record('점검 결과', split, sid, now, WORKER, judged=judged, confirmed=confirmed, note=outcome)
+                                LOG.record('작업 완료', split, sid, done_h, WORKER, note=details)
+                                LOG.record('점검 결과', split, sid, done_h, WORKER, judged=judged, confirmed=confirmed, note=outcome)
                                 st.session_state.pop('focus_tid', None)
                                 st.toast(f'{sid}: 완료 보고', icon=':material/task_alt:')
                                 st.rerun()
@@ -1003,7 +1035,7 @@ else:
         srow = t.loc[sid]
         sstage = srow['상태'].split(' (')[0]
         with left:
-            st.caption(f'선택: {sid} · {sstage} · {now}h')
+            st.caption(f'선택: {sid} · {sstage} · {clock(now)}')
         with right:
             with st.container(horizontal=True, vertical_alignment='center'):
                 st.markdown(f'##### {sid} · 정비 비용 비교')
@@ -1050,14 +1082,27 @@ else:
                                 plan_note += f'그때까지 고장 확률 {po_[0]["고장 확률"]:.2f}로 안전 기준을 넘습니다. '
                             break
                 items.append(('24시간 조치 안 함', p24 * costs.failure_loss, ALARM_RED, False))
+                # 즉시 조치 = 지금 해도 안전 기준 초과 (work_plan 제약). e['urgent']는 정비팀 차례 대기를 넣은 판정이라 '정비팀 부족'도 포함한다
+                now_unsafe = r_['제약'].startswith('즉시')
+                # 결론 한 줄 (2026-10-19): 막대를 읽기 전에 추천과 비용 차이를 먼저 보여 준다
+                if job_ != '작업 완료':
+                    worst = max((x for x in items if not x[3]), key=lambda x: x[1], default=None)
+                    st.markdown(f'##### :blue[:material/recommend: 결론 · {b["선택지"]}' + (' (즉시 조치)' if now_unsafe else '') + ']')
+                    st.markdown(f'기대 총비용 **{fmt_cost(b["기대 총비용"], costs)}**'
+                                + (f' · {worst[0].split(" (")[0]}이면 **{fmt_cost(worst[1], costs)}**'
+                                   f' (차이 {fmt_cost(worst[1] - b["기대 총비용"], costs)})'
+                                   if worst is not None and worst[1] > b['기대 총비용'] else ''))
                 cost_bars(items, costs)
                 start_h = now + max(0.0, r_['_start'])
                 todo = ('재가동 뒤 새 예측 확인' if job_ == '작업 완료' else
                         f'{r_["다음 정기 교체"]} 두 부품 함께 교체 · 그때까지 추이 관찰' if b['선택지'].startswith('다음 정기') else
-                        f'아래에서 배정 · {start_h:.0f}시간 교체 시작 예정'
+                        '아래에서 배정 · 즉시 조치라 정비팀 차례를 기다리지 않고 지금 시작' if now_unsafe else
+                        f'아래에서 배정 · {clock(start_h)} 교체 시작 예정'
                         + (f' (정비팀 차례 대기 {r_["_slot"]:.0f}시간)' if r_['_slot'] else ''))
                 if e['urgent'] and job_ != '작업 완료':
-                    st.markdown(':red-badge[:material/emergency: 즉시 조치: 지금 해도 안전 기준 초과]')
+                    # 2026-10-19: 정비팀 부족(차례를 기다리면 기준 초과)까지 '지금 해도 초과'로 보이던 것을 판정대로 나눈다
+                    st.markdown(':red-badge[:material/emergency: 즉시 조치: 지금 해도 안전 기준 초과]' if now_unsafe else
+                                ':orange-badge[:material/groups: 정비팀 부족: 차례를 기다리면 안전 기준 초과 (팀·공수 추가 필요)]')
                 st.info(f'**추천:** {b["선택지"]} | **다음 할 일:** {todo}')
                 st.caption(f'추천 = 완료 전 고장 확률이 안전 기준({cfg.safety_max:.2f}) 이하인 선택지 중 기대 총비용이 가장 낮은 것. '
                            + ('어떤 선택지도 안전 기준을 못 지켜 가장 빨리 할 수 있는 조치를 권합니다. ' if e['urgent'] else '')
@@ -1097,10 +1142,9 @@ else:
             f3 = st.segmented_control('작업 구분', ['전체', '지금', '지연', '예정', '완료'], default='전체', key='task_filter',
                                       label_visibility='collapsed')
             shown = tf if f3 in (None, '전체') else tf[tf['구분'] == f3]
-            st.dataframe(shown.assign(confirmed=shown['confirmed'].map(lambda x: PART_NAMES.get(x, x)))[['id', 'sid', 'title', 'team', 'priority', '상태', '구분', 'due_h', 'outcome', 'confirmed']].rename(columns={
-                'id': '번호', 'sid': '설비', 'title': '작업', 'team': '팀', 'priority': '우선순위', 'due_h': '예정 (h)', 'outcome': '완료 결과',
-                'confirmed': '확인된 원인'}), hide_index=True,
-                column_config={'예정 (h)': st.column_config.NumberColumn(format='%d')})
+            st.dataframe(shown.assign(confirmed=shown['confirmed'].map(lambda x: PART_NAMES.get(x, x)), due_h=shown['due_h'].map(clock))[['id', 'sid', 'title', 'team', 'priority', '상태', '구분', 'due_h', 'outcome', 'confirmed']].rename(columns={
+                'id': '번호', 'sid': '설비', 'title': '작업', 'team': '팀', 'priority': '우선순위', 'due_h': '예정', 'outcome': '완료 결과',
+                'confirmed': '확인된 원인'}), hide_index=True)
             with st.container(horizontal=True):
                 with st.popover('작업 수정', icon=':material/edit:'):
                     # 완료된 작업도 고칠 수 있다 (완료 보고: 결과·부품·수행 내용). 고친 내용은 점검 결과로 다시 기록해 되먹임에 반영
@@ -1116,11 +1160,14 @@ else:
                     with st.form(f'edit_task_{tid}', border=False):
                         e_team = st.selectbox('담당 팀', list(tasks.TEAMS), index=list(tasks.TEAMS).index(cur['team']))
                         e_prio = st.selectbox('우선순위', tasks.PRIORITIES, index=tasks.PRIORITIES.index(cur['priority']))
-                        e_due = st.number_input('시작 예정 (h)', 0.0, 240.0, min(240.0, float(cur['due_h'])), 1.0, format='%.0f')
+                        e_due = st.selectbox('시작 예정', list(range(241)), index=min(240, int(round(cur['due_h']))), format_func=clock)
                         e_guide = st.text_area('점검 가이드', value=cur['guide'], max_chars=tasks.LIMITS['guide'])
                         e_reason = st.text_area('추천 이유', value=cur['reason'], max_chars=tasks.LIMITS['reason'])
                         if e_state == '완료':
-                            st.markdown('**완료 보고**' + (f' (완료 {cur["completed_h"]:.0f}시간)' if done_ else f' (지금 {now}시간에 완료로 기록)'))
+                            st.markdown('**완료 보고**' + (f' (완료 {clock(cur["completed_h"])})' if done_ else ''))
+                            if not done_:   # 새로 완료로 바꿀 때만 완료 시각을 고른다 (이미 완료된 작업은 시각을 그대로 둔다)
+                                lo_e = min(int(np.ceil(cur['started_h'] if pd.notna(cur['started_h']) else cur['created_h'])), int(now))
+                                e_at = hour_pick('완료 시각', lo_e, now, now, f'edit_at_{tid}')
                             pick = lambda opts, v, d: opts.index(v) if v in opts else opts.index(d)
                             e_out = st.selectbox('작업 결과', tasks.OUTCOMES, index=pick(tasks.OUTCOMES, cur['outcome'], '이상 발견'))
                             e_jud = st.selectbox('점검으로 판단한 부품', tasks.JUDGED, index=pick(tasks.JUDGED, cur['judged'], '구분 못함'),
@@ -1128,15 +1175,16 @@ else:
                             e_con = st.selectbox('교체 뒤 확인된 원인 부품', tasks.CONFIRMED,
                                                  index=pick(tasks.CONFIRMED, cur['confirmed'], '아직 모름'), format_func=lambda x: PART_NAMES.get(x, x))
                             e_det = st.text_area('수행 내용', value=cur['details'] if done_ else '', max_chars=tasks.LIMITS['details'])
-                        if st.form_submit_button('수정 저장', type='primary'):
+                        if st.form_submit_button('수정 저장', type='primary') and (
+                                e_state != '완료' or done_ or pick_ok(e_at, lo_e, now)):
                             try:
                                 TASKS.edit(tid, e_team, e_prio, e_due, e_guide, e_reason)
                                 if e_state != cur['상태']:
                                     # 상태 변경: 작업 기록을 바꾸고, 진행 단계 기록(src/actions.py)에도 남겨 화면 전체가 같은 상태를 본다
                                     if e_state == '완료':
-                                        TASKS.set_status(tid, '완료', now, e_out, e_det, e_jud, e_con)
-                                        LOG.record('작업 완료', split, cur['sid'], now, MANAGER, note=f'상태 변경 #{tid}: {e_det}')
-                                        LOG.record('점검 결과', split, cur['sid'], now, MANAGER, judged=e_jud, confirmed=e_con, note=e_out)
+                                        TASKS.set_status(tid, '완료', e_at, e_out, e_det, e_jud, e_con)
+                                        LOG.record('작업 완료', split, cur['sid'], e_at, MANAGER, note=f'상태 변경 #{tid}: {e_det}')
+                                        LOG.record('점검 결과', split, cur['sid'], e_at, MANAGER, judged=e_jud, confirmed=e_con, note=e_out)
                                     else:
                                         TASKS.set_status(tid, e_state, now)
                                         if done_:   # 되돌린 완료의 점검 결과는 같은 시각에 '아직 모름'으로 덮는다 (되먹임은 마지막 기록만 센다)
@@ -1189,17 +1237,17 @@ if page == '설비 상세':
                        if pd.notna(t.loc[s, '위험 확률']) else f'{s} · {t.loc[s, "상태"]}')
     row = t.loc[sid]
     st.header(f'{sid}', icon=ICONS['설비 상세'])
-    st.caption(f'{split_label} · 지금 {now}시간 기준')
+    st.caption(f'{split_label} · 지금 {clock(now)} 기준')
 
     c1, c2, c3, c4 = st.columns(4, border=True)
     c1.metric('상태', row['상태'].split(' (')[0], help=row['상태'])   # 칸이 좁아 영문 이름은 도움말로
     c2.metric('24시간 안 고장 확률', '—' if pd.isna(row['위험 확률']) else f'{row["위험 확률"]:.2f}',
-              help=f'마지막 예측: {row["마지막 예측 (h)"]:.0f}시간' if pd.notna(row['마지막 예측 (h)']) else None)
+              help=f'마지막 예측: {clock(row["마지막 예측 (h)"])}' if pd.notna(row['마지막 예측 (h)']) else None)
     if CAUTION:
         c3.metric('지금 열화 중일 확률', '—' if pd.isna(row['열화 확률']) else f'{row["열화 확률"]:.2f}')
-        c4.metric('첫 주의 / 첫 경보', ' / '.join('—' if pd.isna(row[k]) else f'{row[k]:.0f}h' for k in ['첫 주의 (h)', '첫 경보 (h)']))
+        c4.metric('첫 주의 / 첫 경보', ' / '.join(clock(row[k]) for k in ['첫 주의 (h)', '첫 경보 (h)']))
     else:
-        c3.metric('첫 경보', '—' if pd.isna(row['첫 경보 (h)']) else f'{row["첫 경보 (h)"]:.0f}시간')
+        c3.metric('첫 경보', clock(row['첫 경보 (h)']))
 
     if row['상태'] == WARN:
         st.error(

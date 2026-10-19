@@ -113,6 +113,7 @@ class DSSConfig:
     p_other_needed: float = 0.5  # 정기 교체 때 함께 바꾸는 다른 부품이 실제 원인일 확률 (부품을 모르므로 0.5)
     prep_h: float = MIN_LEAD_H   # 경보 뒤 교체를 끝내기까지 필요한 시간 (부품 조달 + 교체 4시간). 데이터셋 규칙은 4시간
     crew_wait_h: float = 0.0     # 정비팀이 일을 시작할 수 있을 때까지 시간 (실행 가능성)
+    charge_unknown: bool = False  # 미확정 경보도 조치 비용을 센다 (고장 예정이 없었다고 보고 교체 비용 전부 = 상한)
     costs: Costs = field(default_factory=Costs)
     parts: PartsPolicy = field(default_factory=PartsPolicy)
 
@@ -287,8 +288,11 @@ def score(row, action, cause, cfg=None, start_h=None, extra=0.0):
     lead = (row['TSTAR'] - row['OBSERVED_AT']).total_seconds() / 3600 if row['EV'] == 1 else np.inf
     if action == 'none':
         return ('고장' if row['EV'] == 1 else '해당 없음'), (c.failure_loss if row['EV'] == 1 else 0), (c.repair_h if row['EV'] == 1 else 0)
-    if unknown:
+    if unknown and not cfg.charge_unknown:
         return '미확정', np.nan, np.nan
+    if unknown:                                                 # 결과를 몰라도 조치하면 드는 비용 (멀쩡한 부품으로 계산)
+        _, cost, down = score({**row, 'EV': 0, 'FOLLOW_H': np.inf}, action, None, cfg, start_h, extra)
+        return '미확정 (조치 비용 포함)', cost, down
     if action == 'now':
         done = (start_after(cfg, []) if start_h is None else start_h) + c.replace_h
         if lead < done:
@@ -386,7 +390,7 @@ def simulate(pts, prob, th, curve, cfg=None, policy='dss'):
         '고장 전 조치 완료율': (float((at_risk & ~failed).sum() / (at_risk.sum() + len(missed)))
                           if at_risk.sum() + len(missed) else (0.0 if policy == 'regular' else np.nan)),
         '계획 밖 정지(h)': float(miss_down + lab['계획 밖 정지(h)'].sum()),
-        '미확정 경보': int((out['결과'] == '미확정').sum()),
+        '미확정 경보': int(out['결과'].str.startswith('미확정').sum()),
         '긴급 조달': int(n_rush), '긴급 조달 비용': float(rush_total),
     }
     return {'summary': summary, 'episodes': out}

@@ -180,6 +180,8 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 *.csv
+# 원자료 없이 검증 결과(AP·혼동행렬)를 다시 계산하는 파일은 올린다 (analysis/13_export_validation.py)
+!predictions/validation_risk24.csv
 # 개인 탐색용 노트북은 커밋하지 않음 (커밋은 .py만)
 *.ipynb
 

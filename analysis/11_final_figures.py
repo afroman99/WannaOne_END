@@ -105,7 +105,9 @@ def policy():
                 va='center', fontsize=9, color=INK)
     ax.set_xlim(0, 13.5)
     ax.set_xlabel('기대 총비용 (억 원, 현장 가정값)')
-    ax.set_title('정비 정책 비교 (검증 세트 72개 시나리오): ③이 ①보다 2.08억 원(28%) 적음', fontsize=10, color=INK, loc='left')
+    ax.set_title('정비 정책 비교 (검증 세트 72개 시나리오, 현장 가정 단가, 미확정 경보 8건 제외): ③이 ①보다 27.6% 적음\n'
+                 '미확정 8건을 모두 불필요 교체로 보고 조치 비용을 넣으면 ③ 7.61억 원으로 ①보다 0.9% 많음 (analysis/12_report_checks.py)',
+                 fontsize=9, color=INK, loc='left')
     fig.tight_layout()
     save_figure(fig, '24_dss_정책비교.png', dpi=200)
 

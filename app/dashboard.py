@@ -736,29 +736,75 @@ def ontology_graph(A, t, with_decisions=True):
                           th=TH, cth=CTH, actions=LOG.frame(split, now), feedback=feedback())
 
 
-def action_guide(row):
-    """상태별 조치 안내 상자 (설비 페이지에서 근거·비용 화면으로 옮김, 2026-10-21)"""
+def guide_content(row):
+    """상태별 조치 안내: (색, 제목, 아이콘, 본문). 근거·비용 화면의 조치 안내 칸이 쓴다 (2026-10-21)"""
     if row['상태'] == WARN:
-        st.error(
-            '24시간 안에 고장 날 위험이 높습니다.\n'
-            '- 교체에 4시간이 걸리므로, 늦어도 고장 예상 4시간 전에는 교체를 시작해야 합니다.\n'
-            '- 센서로는 원인 부품(진동장치·밸브)을 구분할 수 없습니다. 두 부품을 모두 점검하세요.\n'
-            '- 고장 원인과 상관없이 같은 신호가 오르므로, 설비 페이지의 신호 흐름으로 열화가 계속되는지 확인하세요.',
-            title='조치 안내: 교체', icon=':material/build:')
-    elif row['상태'] == CAU:
-        st.warning(
-            '열화가 시작된 것으로 보입니다. 아직 24시간 안 고장 위험은 낮습니다.\n'
-            '- 장비 상태를 확인하세요. 설비가 정상적으로 돌아가면 **다음 정비 때 이 부분까지 함께 정비**합니다.\n'
-            '- 두 부품(진동장치·밸브)의 재고를 확인하고, 없으면 지금 발주를 시작하세요. 경보까지 보통 반나절 정도 남습니다.\n'
-            f'- 주의 중 일부는 열화가 아닌 헛걸음입니다(검증 세트 {CAUTION["validation"]["주의 묶음"]}번 중 '
-            f'{CAUTION["validation"]["열화 아닌 설비의 주의"]}번). 점검에서 이상이 없으면 그대로 운전합니다.',
-            title='조치 안내: 점검', icon=':material/search_check:')
-    elif row['상태'] in ('정비 중', '정비 후 예측 대기'):
-        st.warning(f'정비가 시작돼 정비 전 예측은 더 이상 쓰지 않습니다. 재가동 뒤 다음 예측 시점({STEP}시간마다)에 다시 예측합니다.')
-    else:
-        st.success('지금은 열화 신호가 없고, 24시간 안 고장 위험이 낮습니다.' if CAUTION else '지금은 24시간 안 고장 위험이 낮습니다.')
+        return ('red', '조치 안내: 교체', ':material/build:',
+                '24시간 안에 고장 날 위험이 높습니다.\n'
+                '- 교체에 4시간이 걸리므로, 늦어도 고장 예상 4시간 전에는 교체를 시작해야 합니다.\n'
+                '- 센서로는 원인 부품(진동장치·밸브)을 구분할 수 없습니다. 두 부품을 모두 점검하세요.\n'
+                '- 고장 원인과 상관없이 같은 신호가 오르므로, 아래 분석 근거의 신호 흐름으로 열화가 계속되는지 확인하세요.')
+    if row['상태'] == CAU:
+        return ('orange', '조치 안내: 점검', ':material/search_check:',
+                '열화가 시작된 것으로 보입니다. 아직 24시간 안 고장 위험은 낮습니다.\n'
+                '- 장비 상태를 확인하세요. 설비가 정상적으로 돌아가면 **다음 정비 때 이 부분까지 함께 정비**합니다.\n'
+                '- 두 부품(진동장치·밸브)의 재고를 확인하고, 없으면 지금 발주를 시작하세요. 경보까지 보통 반나절 정도 남습니다.\n'
+                f'- 주의 중 일부는 열화가 아닌 헛걸음입니다(검증 세트 {CAUTION["validation"]["주의 묶음"]}번 중 '
+                f'{CAUTION["validation"]["열화 아닌 설비의 주의"]}번). 점검에서 이상이 없으면 그대로 운전합니다.')
+    if row['상태'] in ('정비 중', '정비 후 예측 대기'):
+        return ('orange', '조치 안내: 정비 중', ':material/build:',
+                f'정비가 시작돼 정비 전 예측은 더 이상 쓰지 않습니다. 재가동 뒤 다음 예측 시점({STEP}시간마다)에 다시 예측합니다.')
+    return ('green', '조치 안내: 운전 계속', ':material/check_circle:',
+            '지금은 열화 신호가 없고, 24시간 안 고장 위험이 낮습니다.' if CAUTION else '지금은 24시간 안 고장 위험이 낮습니다.')
 
 
+def remaining_median(curve, elapsed, cap=240.0):
+    """경보 뒤 elapsed시간 동안 고장이 없었을 때 고장 확률이 절반이 되는 남은 시간(h) = 고장 예상까지(중앙값).
+    학습 세트의 '경보 뒤 고장까지 걸린 시간' 분포(비용 계산의 P와 같은 곡선)로 계산한다. cap 안에서 절반이 안 되면 None"""
+    for h in np.arange(0.25, cap + 0.25, 0.25):
+        if fail_prob(curve, elapsed, h) >= 0.5:
+            return float(h)
+    return None
+
+
+def hms(h):
+    """시간(h) → hh:mm:ss"""
+    sec = int(round(h * 3600))
+    return f'{sec // 3600:02d}:{sec % 3600 // 60:02d}:{sec % 60:02d}'
+
+
+def ontology_dot(sid, srow, e=None, costs=None):
+    """온톨로지에 넣은 연결을 그림으로 (설비 하나): 설비 → 단계 → 예측 → 신호, 단계 → 정비 결정 → 선택지 → 부품 (graphviz DOT)"""
+    def q(x):
+        return '"' + str(x).replace('"', "'") + '"'
+    stage = srow['상태'].split(' (')[0]
+    fill = {'경보': '#FFD6DC', '주의': '#FCE9C6', '정상': '#DDF3EA'}.get(stage, '#E6EAF0')
+    out = ['digraph G {', 'rankdir=LR; bgcolor="transparent"; nodesep=0.25; ranksep=0.45;',
+           'node [shape=box, style="rounded,filled", fillcolor="#EEF2F8", color="#9AAFCB", fontname="Noto Sans KR", fontsize=11];',
+           'edge [fontname="Noto Sans KR", fontsize=10, color="#8392AB", fontcolor="#8392AB"];',
+           f'E [label={q(nm(sid) + chr(10) + sid)}, fillcolor="#D9E6FB"];',
+           f'S [label={q("단계" + chr(10) + stage)}, fillcolor="{fill}"];', 'E -> S [label="상태"];']
+    if pd.notna(srow['위험 확률']):
+        pred_h, prob = srow['마지막 예측 (h)'], srow['위험 확률']
+        out += [f'P [label={q(f"{pred_h:.0f}h 예측" + chr(10) + f"24시간 내 고장 위험 {prob:.0%}")}];',
+                'E -> P [label="관측"]; S -> P [label="근거"];']
+        cur = after_last_maintenance(hr_now[hr_now['SCENARIO_ID'] == sid].assign(HOUR_START=lambda d: d['DONE_H'] - 1), 'HOUR_START')
+        last = cur.dropna(subset=list(SIGNAL_NAMES)).tail(1)
+        for k, (col, name) in enumerate(SIGNAL_NAMES.items()):
+            if len(last):
+                v = float(last[col].iloc[0])
+                out += [f'G{k} [label={q(f"{name}" + chr(10) + f"{v:.2f}" + (" (벗어남)" if v > 1 else ""))}, '
+                        f'fillcolor="{"#FFD6DC" if v > 1 else "#EEF2F8"}"];', f'P -> G{k} [label="근거"];']
+    if e is not None:
+        out += ['D [label="정비 결정", fillcolor="#E6E0FA"];', 'S -> D [label="요청"];']
+        for k, o in enumerate(e['opts']):
+            rec = o is e['best']
+            cost = f"{chr(10)}{o['기대 총비용']:,.0f}{costs.unit if costs is not None else ''}"
+            out += [f'O{k} [label={q(o["선택지"] + cost)}, fillcolor="{"#CFE0FF" if rec else "#EEF2F8"}", penwidth={2 if rec else 1}];',
+                    f'D -> O{k} [label="{"추천" if rec else "비교"}"];']
+            if rec:
+                out += ['V [label="밸브"]; X [label="진동장치"];', f'O{k} -> V [label="교체"]; O{k} -> X [label="교체"];']
+    return '\n'.join(out + ['}'])
 def equipment_detail(sid, t, nested=False):
     """설비 하나의 상태 자세히: 지표 네 칸 · 입력 감시 · 위험 확률 흐름 · 네 신호 흐름 · 지금 신호 상태 · 모델이 본 이유.
     설비 페이지(하위 페이지)와 근거·비용 화면의 '설비 페이지' 접힌 칸(2026-10-21, nested=True)이 같이 쓴다"""
@@ -975,6 +1021,18 @@ def assign_box(sid, srow, sstage, job_, dec_i, W, cfg, load, border=True):
         if go:
             assign_task(sid, title_f, team_f, prio_f, due_f, guide_f, reason_f, rec)
             st.rerun()
+    order_buttons(sid, sstage, alarm, rec, cfg, W)
+
+
+def order_rush(sid, parts):
+    """두 부품 긴급 조달 (콜백): 조달 중이 아닌 부품을 긴급으로 발주 기록"""
+    for q in parts:
+        LOG.record('부품 발주', split, sid, now, MANAGER, part=q, option='긴급')
+    st.toast(f'{nm(sid)}: ' + ', '.join(PART_NAMES[q] for q in parts) + ' 긴급 조달', icon=':material/bolt:')
+
+
+def order_buttons(sid, sstage, alarm, rec, cfg, W):
+    """보류 · 부품 보충 발주 · 두 부품 긴급 조달 버튼 줄 (정비 판단 상자 맨 아래)"""
     if sstage in ('경보', '주의'):
         coming_ = {x for x, _, _ in in_transit(cfg).get(sid, [])}
         with st.container(horizontal=True):
@@ -992,11 +1050,12 @@ def assign_box(sid, srow, sstage, job_, dec_i, W, cfg, load, border=True):
                       help=f'{cfg.parts.rush_h:.0f}시간 안에 도착, 웃돈 부품값의 {cfg.parts.rush_markup:.0%}')
 
 
-def order_rush(sid, parts):
-    """두 부품 긴급 조달 (콜백): 조달 중이 아닌 부품을 긴급으로 발주 기록"""
-    for q in parts:
-        LOG.record('부품 발주', split, sid, now, MANAGER, part=q, option='긴급')
-    st.toast(f'{nm(sid)}: ' + ', '.join(PART_NAMES[q] for q in parts) + ' 긴급 조달', icon=':material/bolt:')
+def assign_from_card(sid, team_key, title, priority, due_h, reason, option):
+    """비용 칸의 '작업자 화면으로 배정' (콜백, 2026-10-21): 그 칸의 선택지로 배정. 점검 가이드·덧붙일 말은 '작업 내용 바꾸기'에서"""
+    team = st.session_state.get(team_key, list(tasks.TEAMS)[0])
+    guide = st.session_state.get(f'guide_txt_{sid}') or tasks.DEFAULT_GUIDE
+    note = str(st.session_state.get(f'reason_txt_{sid}', '')).strip()
+    assign_task(sid, title, team, priority, min(240.0, max(0.0, float(due_h))), guide, reason + (f' · {note}' if note else ''), option)
 
 
 def cancel_task(tid, sid, title, why_key):
@@ -1364,12 +1423,18 @@ else:
                 '{ width: 100%; justify-content: flex-start; text-align: left; }'
                 '[class*="st-key-card_"] button p { line-height: 1.25; }'
                 '[class*="st-key-card_"] button strong { font-size: 2.25rem; font-weight: 500; display: block; margin-top: 10px; }'
+                # 조치 안내 칸: 알림 상자처럼 연한 바탕 (라이트·다크 모두 보이게 반투명). 고정된 글만 넣는다
+                '.st-key-guide_red { background: rgba(255,102,122,0.10); border-color: rgba(255,102,122,0.45) !important; }'
+                '.st-key-guide_orange { background: rgba(247,185,85,0.12); border-color: rgba(247,185,85,0.5) !important; }'
+                '.st-key-guide_green { background: rgba(45,212,160,0.10); border-color: rgba(45,212,160,0.45) !important; }'
+                '[class*="st-key-guide_"] [data-testid="stMetricValue"] { font-variant-numeric: tabular-nums; }'
                 '</style>')
 
         def decision_panel(sid):
-            """설비 하나의 정비 판단 (2026-10-21 3차 피드백)
-            조치 안내 → 큰 상자: 예측정비 · 다음 정기 교체 · 사후정비 비용(만 원) → 배정·보류·부품 발주(보충·두 부품 긴급)
-            그 아래: 설명 → 접힌 칸(설비 페이지 · 근거 사슬(온톨로지) · 비용 가정 · 비용 계산 근거)"""
+            """설비 하나의 정비 판단 (2026-10-21 6차 피드백)
+            조치 안내 칸(안내 · 분석 근거 · 근거(온톨로지 그림) | 고장 예상까지)
+            → 정비 판단 상자: 즉시 정비 · 다음 정기 교체 · 사후정비 칸마다 비용과 담당 팀 · 배정 → 작업 내용 바꾸기 · 보류 · 부품 발주
+            → 설명 → 접힌 칸(비용 가정 · 비용 계산 근거)"""
             srow = t.loc[sid]
             sstage = srow['상태'].split(' (')[0]
             st.subheader(nm(sid), icon=':material/precision_manufacturing:')
@@ -1388,12 +1453,8 @@ else:
                 st.markdown(f':green-badge[:material/task_alt: {JOB_NOTE[job_]}]' if job_ == '작업 완료'
                             else f':orange-badge[:material/stop_circle: {JOB_NOTE[job_]}]' if job_ == '작업 중단'
                             else f':blue-badge[:material/info: {JOB_NOTE[job_]}]')
-            # 조치 안내: 비용보다 먼저 (2026-10-21 4차 피드백)
-            action_guide(srow)
-            if sstage == '주의':
-                pr = procurement(cfg, W['stock'], [sid]).iloc[0]
-                st.caption(f'부품: {pr["발주"]} (재고 {pr["재고"]})')
             alarm = sid in dec_i.index
+            e = b = r_ = None
             if alarm:
                 r_ = dec_i.loc[sid]
                 e = r_['_e']
@@ -1401,9 +1462,9 @@ else:
                 p24 = fail_prob(W['curve'], e['elapsed'], 24)
                 now_opt = next(o for o in e['opts'] if o['선택지'].startswith('지금'))
                 plan_opt = next((o for o in e['opts'] if not o['선택지'].startswith('지금')), None)
-                plan_cost, plan_sub, plan_note = None, '', ''
+                plan_cost, plan_sub, plan_note, plan_start = None, '', '', None
                 if plan_opt is not None:
-                    plan_cost, plan_sub = plan_opt['기대 총비용'], plan_opt['선택지']
+                    plan_cost, plan_sub, plan_start = plan_opt['기대 총비용'], plan_opt['선택지'], e['wait_h']
                 else:
                     # 엔진 조건(최대 대기·부품·정비팀) 밖이거나 정기 교체 계획이 없으면 비교용으로만 계산한다
                     #   정비팀 차례 대기는 계획 정비에도 똑같이 건다 (2026-10-16: 대기 없이 비교하면 '나중에 하는 게 더 빨리 끝나는' 비교가 됨)
@@ -1416,6 +1477,7 @@ else:
                                                   stock=W['stock'][sid], plan_part=e['plan_part']) if not o['선택지'].startswith('지금')]
                         if po_:
                             plan_cost = po_[0]['기대 총비용']
+                            plan_start = e['wait_h'] if d_ is None else float(d_)
                             plan_sub = (f'{e["wait_h"]:.0f}시간 뒤 · 조건 밖이라 비교만' if d_ is None else
                                         ('정기 교체 때 부품을 맞출 수 없음' if has_plan else '정기 교체 계획 없음') + f' · {d_}시간 뒤 정지 가정')
                             plan_note = (f'다음 정기 교체({e["wait_h"]:.0f}시간 뒤)는 최대 대기·부품·정비팀 조건 밖이라 추천 대상에서 뺐습니다. '
@@ -1425,54 +1487,96 @@ else:
                             if po_[0]['고장 확률'] > cfg.safety_max:
                                 plan_note += f'그때까지 고장 확률 {po_[0]["고장 확률"]:.2f}로 안전 기준을 넘습니다. '
                             break
-            # 큰 상자: 비용 비교 세 칸 → 배정
+            # 조치 안내 칸 (알림 상자처럼 꾸민 테두리 칸: 알림 상자 st.error에는 토글을 넣을 수 없어서, 2026-10-21)
+            tone, g_title, g_icon, g_body = guide_content(srow)
+            remain = remaining_median(W['curve'], e['elapsed']) if alarm else None
+            with st.container(border=True, key=f'guide_{tone}'):
+                g_left, g_right = st.columns([3.2, 1], vertical_alignment='center') if alarm else (st.container(), None)
+                with g_left:
+                    st.markdown(f'**:{tone}[{g_icon} {g_title}]**')
+                    st.markdown(g_body)
+                    if sstage == '주의':
+                        pr = procurement(cfg, W['stock'], [sid]).iloc[0]
+                        st.caption(f'부품: {pr["발주"]} (재고 {pr["재고"]})')
+                    # 분석 근거 (설비 페이지 내용): 그래프가 많아 펼칠 때만 그린다 (on_change='rerun' → 접혀 있으면 계산하지 않음)
+                    eq_box = st.expander('분석 근거', icon=':material/monitoring:', key=f'eq_detail_{sid}', on_change='rerun')
+                    if eq_box.open:
+                        with eq_box:
+                            equipment_detail(sid, t, nested=True)
+                    # 근거 사슬 (온톨로지): 그림 + 번호 목록. 만들다 실패해도 이 칸만 알린다 (2026-10-21 배포 오류 재발 방지)
+                    on_box = st.expander('근거: 경보 → 예측 → 신호 → 정비 결정 (온톨로지)', icon=':material/account_tree:',
+                                         key=f'onto_{sid}', on_change='rerun')
+                    if on_box.open:
+                        with on_box:
+                            try:
+                                st.graphviz_chart(ontology_dot(sid, srow, e, costs), width='stretch',
+                                                  alt=f'{nm(sid)}의 온톨로지 연결: 설비, 단계, 예측, 신호, 정비 결정, 선택지')
+                                tr = ontology.trace(ontology_graph(A, t), sid, with_cost=alarm)
+                            except Exception as err:
+                                print(f'[dashboard] 근거 사슬 실패: {type(err).__name__}: {err}', file=sys.stderr)
+                                tr = None
+                            if tr is None:
+                                st.caption('근거를 불러오지 못했습니다. 앱을 다시 시작(Reboot)하면 대부분 해결됩니다. 비용과 배정은 그대로 쓸 수 있습니다.')
+                            else:
+                                unit_ = '만 원' if costs.unit == '만 원' else '점'   # 비용 단위는 화면에서 붙인다 (모듈 버전과 상관없게)
+                                tr = [(k, re.sub(r'(기대 총비용 [\d,]+)(?![\d,]|만 원|점)', rf'\1{unit_}', v)) for k, v in tr]
+                                st.markdown('\n'.join(f'{i}. **{k}** · {v}' for i, (k, v) in enumerate(tr, 1)))
+                                st.caption('설비·예측·신호·경보·정비 결정·정기 교체 계획을 하나의 그래프(온톨로지, OWL/RDF)로 잇고, 그 연결을 그림과 '
+                                           '목록으로 보여 줍니다. 판단은 경보 기준과 의사결정 규칙이 하고, 그래프는 그 근거를 이어 보여 줍니다.')
+                if g_right is not None:
+                    with g_right:
+                        st.metric('고장 예상까지', hms(remain) if remain is not None else '—')
+            # 정비 판단 상자: 칸마다 비용과 그 선택지로 배정 (2026-10-21)
             with st.container(border=True):
                 st.markdown(f'##### {nm(sid)} · 정비 판단')
                 if alarm:
-                    m1, m2, m3 = st.columns(3, border=True)
-                    with m1:
-                        st.metric('예측정비' + (' · 추천' if b is now_opt else ''), manwon(now_opt['기대 총비용']),
-                                  help='경보를 보고 지금 두 부품을 교체할 때의 기대 총비용')
-                        st.caption(now_opt['선택지'])
-                    with m2:
-                        st.metric('다음 정기 교체' + (' · 추천' if plan_opt is not None and b is plan_opt else ''),
-                                  manwon(plan_cost) if plan_cost is not None else '—',
-                                  help='정해 둔 정기 교체(계획 정지) 때 두 부품을 함께 교체할 때의 기대 총비용')
-                        st.caption(plan_sub or '계산할 수 없음')
-                    with m3:
-                        st.metric('사후정비', manwon(costs.failure_loss), help='고장 난 뒤 복구: 계획 밖 정지·생산 차질·복구 비용')
-                        st.caption('고장 난 뒤 복구')
-                st.divider()
-                assign_box(sid, srow, sstage, job_, dec_i, W, cfg, load, border=False)
-            # 상자 아래: 설명 → 근거(접힘) → 접힌 칸
+                    existing = TASKS.blocking(split, sid, now)
+                    can_assign = existing is None and job_ != '작업 완료'
+                    urgent = r_['제약'].startswith('즉시')
+                    team0 = list(tasks.TEAMS).index(min(load, key=load.get))
+                    now_start = now if urgent else now + max(0.0, now_opt['정비 완료까지(h)'] - costs.replace_h)
+                    cards = [('now', '즉시 정비', now_opt['기대 총비용'], now_opt['선택지'], b is now_opt,
+                              '경보를 보고 지금 두 부품을 교체할 때의 기대 총비용',
+                              (f'{sid} 지금 두 부품 교체', '긴급' if urgent else '높음', now_start, '즉시 정비')),
+                             ('plan', '다음 정기 교체', plan_cost, plan_sub or '계산할 수 없음', plan_opt is not None and b is plan_opt,
+                              '정해 둔 정기 교체(계획 정지) 때 두 부품을 함께 교체할 때의 기대 총비용',
+                              (f'{sid} 다음 정기 교체 때 두 부품 교체', '높음', now + (plan_start or 0.0), '다음 정기 교체')),
+                             ('run', '사후정비', costs.failure_loss, '고장 난 뒤 복구', False,
+                              '고장 난 뒤 복구: 계획 밖 정지·생산 차질·복구 비용',
+                              (f'{sid} 사후정비: 운전 계속 · 고장 나면 복구', '보통', now, '사후정비'))]
+                    for col, (kind, label, cost, sub, rec, help_, job) in zip(st.columns(3, border=True), cards):
+                        with col:
+                            st.metric(label + (' · 추천' if rec else ''), manwon(cost) if cost is not None else '—', help=help_)
+                            st.caption(sub)
+                            if can_assign and cost is not None:
+                                st.selectbox('담당 팀', list(tasks.TEAMS), index=team0, key=f'team_{kind}_{sid}',
+                                             format_func=lambda k: f'{k} · 열린 작업 {load[k]}건')
+                                st.button('작업자 화면으로 배정', icon=':material/send:', key=f'assign_{kind}_{sid}', width='stretch',
+                                          type='primary' if rec else 'secondary', on_click=assign_from_card,
+                                          args=(sid, f'team_{kind}_{sid}', job[0], job[1], job[2],
+                                                f'{sid} · {srow["상태"]} · {label} 선택 · 기대 비용 {manwon(cost)}', job[3]))
+                    if existing:
+                        when = '' if existing['created_h'] <= now else f' ({clock(existing["created_h"])}에 만든 작업)'
+                        st.warning(f'이미 작업 #{int(existing["id"])} · {existing["title"]} ({existing["team"]}){when}이 있어 다시 배정하지 않습니다. '
+                                   '아래 "작업 수정하기"에서 고치거나 배정을 취소할 수 있습니다.', icon=':material/block:')
+                        st.button('작업 수정하기', icon=':material/edit:', key='edit_from_eq', on_click=open_task_edit,
+                                  args=(int(existing['id']),))
+                    elif can_assign:
+                        with st.expander('작업 내용 바꾸기 (점검 가이드 · 추천 이유 덧붙이기)'):
+                            st.text_area('점검 가이드', value=tasks.DEFAULT_GUIDE, height=140, max_chars=tasks.LIMITS['guide'],
+                                         key=f'guide_txt_{sid}')
+                            st.text_input('추천 이유에 덧붙일 말', max_chars=200, key=f'reason_txt_{sid}')
+                        st.caption('칸에서 배정하면 그 선택지로 작업이 만들어지고, 그 팀 작업자 화면의 "지금 할 일"에 바로 나타납니다.')
+                    order_buttons(sid, sstage, True, b['선택지'], cfg, W)
+                else:
+                    assign_box(sid, srow, sstage, job_, dec_i, W, cfg, load, border=False)
+            # 상자 아래: 설명 → 접힌 칸
             if alarm:
                 st.markdown(f'- 고장 나면 드는 돈(정지·생산 차질·복구): **{manwon(costs.failure_loss)}**\n'
                             f'- 추천 조치({b["선택지"]})의 기대 비용: **{manwon(b["기대 총비용"])}** · 끝나기 전에 고장 날 확률: '
                             f'**{b["고장 확률"]:.0%}** (안전 기준 {cfg.safety_max:.0%})'
                             + (f'\n- 고장 난 뒤 고치는 것보다 **{manwon(costs.failure_loss - b["기대 총비용"])}** 적게 듭니다'
                                if costs.failure_loss > b['기대 총비용'] else ''))
-            # 설비 페이지 (신호 · 정비 이력): 하위 페이지로 넘어가지 않고 이 자리에서 펼쳐 본다 (2026-10-21).
-            #   그래프가 많아 펼칠 때만 그린다 (on_change='rerun' → 접혀 있으면 계산하지 않음)
-            eq_box = st.expander('설비 페이지 (신호 · 정비 이력)', icon=':material/monitoring:', key=f'eq_detail_{sid}', on_change='rerun')
-            if eq_box.open:
-                with eq_box:
-                    equipment_detail(sid, t, nested=True)
-            # 근거 사슬 (온톨로지, 눌러야 펼쳐짐). 만들다 실패해도 이 칸만 알리고 나머지 화면은 그대로 둔다 (2026-10-21 배포 오류 재발 방지)
-            with st.expander('근거: 경보 → 예측 → 신호 → 정비 결정 (온톨로지)', icon=':material/account_tree:'):
-                try:
-                    tr = ontology.trace(ontology_graph(A, t), sid, with_cost=alarm)
-                except Exception as err:
-                    print(f'[dashboard] 근거 사슬 실패: {type(err).__name__}: {err}', file=sys.stderr)
-                    tr = None
-                if tr is None:
-                    st.caption('근거를 불러오지 못했습니다. 앱을 다시 시작(Reboot)하면 대부분 해결됩니다. 비용과 배정은 그대로 쓸 수 있습니다.')
-                else:
-                    unit_ = '만 원' if costs.unit == '만 원' else '점'   # 비용 단위는 화면에서 붙인다 (모듈 버전과 상관없게)
-                    tr = [(k, re.sub(r'(기대 총비용 [\d,]+)(?![\d,]|만 원|점)', rf'\1{unit_}', v)) for k, v in tr]
-                    st.markdown('\n'.join(f'{i}. **{k}** · {v}' for i, (k, v) in enumerate(tr, 1)))
-                    st.caption('설비·예측·신호·경보·정비 결정·정기 교체 계획을 하나의 그래프(온톨로지, OWL/RDF)로 잇고, 그 링크를 따라 읽은 결과입니다. '
-                               '판단은 경보 기준과 의사결정 규칙이 하고, 그래프는 그 근거를 한 줄로 이어 보여 줍니다.')
-            if alarm:
                 with st.expander('이 설비 비용 가정', icon=':material/tune:'):
                     st.markdown(f'- 지금 두 부품 교체 비용: **{manwon(now_opt["정비 비용"])}** (교체 {costs.replace_h:.0f}시간)\n'
                                 f'- 계획 밖 정지 1시간 생산 차질: **{manwon(costs.downtime_h)}**\n'
@@ -1485,6 +1589,8 @@ else:
                                 + f'  \n- **24시간 그냥 두면**: 앞으로 24시간 안 고장 확률 {p24:.2f} × 고장 시 손실 = {manwon(p24 * costs.failure_loss)}'
                                 + f'  \n- 경보가 켜진 뒤 실제 고장까지 걸린 시간(학습 세트)으로 보면, 이 설비가 앞으로 24시간 안에 고장 날 확률은 '
                                   f'{p24:.0%}입니다. 위의 "24시간 내 고장 위험"(모델 예측)과는 계산 방법이 다릅니다.'
+                                + (f'  \n- **고장 예상까지 {hms(remain)}**: 같은 분포에서 경보 뒤 {e["elapsed"]:.0f}시간 동안 고장이 없었다는 조건으로 '
+                                   '고장 확률이 절반이 되는 시간(중앙값)입니다. 확정된 고장 시각이 아니라 추정입니다.' if remain is not None else '')
                                 + f'  \n- P는 학습 세트에서 경보 뒤 실제 고장까지 걸린 시간 분포(경보 뒤 {e["elapsed"]:.0f}시간 동안 고장 없음 조건).')
                     st.caption(f'기대 총비용 = (1 − P) × (정비 비용 + 생산 차질) + P × 고장 시 손실 · P = 정비를 마치기 전에 고장 날 확률. '
                                f'추천 = 완료 전 고장 확률이 안전 기준({cfg.safety_max:.2f}) 이하인 선택지 중 기대 총비용이 가장 낮은 것. '

@@ -280,6 +280,7 @@ streamlit run app/dashboard.py          # 브라우저에서 http://localhost:85
   - `[auth]` `redirect_uri`(앱 주소 + `/oauth2callback`) · `cookie_secret` · `client_id` · `client_secret` · `server_metadata_url`(구글) — Google Cloud에서 OAuth 동의 화면(테스트 사용자 등록)과 웹 클라이언트를 만든다
   - `[db]` `url` — Supabase → Connect → Session pooler 주소 (표는 앱이 처음 접속할 때 스키마 `castpdm`에 만들고 RLS를 켠다)
   - `[users]` `managers = [이메일]`, `[users.teams]` `"정비 1팀" = [이메일]` …
+  - 로그인하면 역할이 고정된다: 설비관리자 계정은 설비관리자 화면만(작업자 화면 버튼 없음), 작업자 계정은 자기 팀 작업자 화면만. 그래서 진행 기록의 '현장 작업'은 실제 작업자가 한 일만 남는다. 로그인 없는 화면(로컬)은 두 역할을 다 고를 수 있다
   - 공용 DB 시험: `TEST_PG_URL=postgresql://… python tests/check_regression.py`
 - 패키지 취약점: pip-audit 0건(tornado 6.5.9로 고정, rdflib 7.6.0 추가 후 다시 확인). 오류 상세 숨김·사용 통계 끔(`.streamlit/config.toml`). 회귀 점검 9절에 보안 항목.
 - 배포: 팀 저장소를 Fork → Streamlit Community Cloud → Fork의 `main` 브랜치, 실행 파일 `app/dashboard.py` → Deploy → Settings의 Secrets에 위 값을 넣는다. 팀 저장소의 변경은 Fork에서 Sync fork를 눌러야 반영된다. 모델을 바꾸면 `05_predict_test.py` → `python -m src.app_data`를 다시 실행해 `app_data/`를 커밋한다.

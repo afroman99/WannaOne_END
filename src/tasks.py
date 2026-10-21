@@ -6,7 +6,8 @@
     store.add(split, sid, title, team, priority, due_h, created_h, guide, reason, option)   # 같은 설비에 열린 작업이 있으면 False
     store.start(task_id, hour); store.complete(task_id, hour, outcome, details, judged, confirmed)
     store.edit(...)  /  store.edit_report(task_id, outcome, details, judged, confirmed)   # 완료된 작업의 보고 고치기
-    store.frame(split, now)                  # 지금 시각에 보이는 작업과 상태(대기·진행 중·완료)
+    store.stop(task_id, hour, why)           # 작업 중단 (사유 필수, 2026-10-21)
+    store.frame(split, now)                  # 지금 시각에 보이는 작업과 상태(대기·진행 중·완료·중단)
     store.setting(key) / store.set_setting(key, value)   # 함께 보는 값 (재생 시각 등)
     store.version()                          # 바뀌었는지 가볍게 확인 (자동 갱신·알림용)
 
@@ -36,12 +37,21 @@ import pandas as pd
 TEAMS = {'정비 1팀': ['김 반장', '이 기사', '박 기사', '최 기사'], '정비 2팀': ['정 반장', '강 기사', '조 기사', '윤 기사']}
 PRIORITIES = ['긴급', '높음', '보통']
 OUTCOMES = ['이상 없음', '이상 발견', '추가 점검 필요']
-STATUSES = ['대기', '진행 중', '완료']
+STATUSES = ['대기', '진행 중', '완료']      # 설비관리자가 고를 수 있는 상태 (중단은 작업자가 '작업 중단'으로만)
+# 완료 보고의 실제 조치 (2026-10-21): 지시(두 부품 교체)와 다르게 했으면 이유를 적어야 한다. 재고는 실제 조치대로 뺀다
+ACTIONS = ['두 부품 교체', '밸브만 교체', '진동장치만 교체', '교체 안 함 (점검만)']
+ACTION_PARTS = {'두 부품 교체': ('valve', 'oscillator'), '밸브만 교체': ('valve',), '진동장치만 교체': ('oscillator',),
+                '교체 안 함 (점검만)': ()}
 JUDGED = ['valve', 'oscillator', '구분 못함']
 CONFIRMED = ['valve', 'oscillator', '아직 모름']
-LIMITS = {'title': 80, 'guide': 600, 'reason': 600, 'details': 500, 'option': 60}
+LIMITS = {'title': 80, 'guide': 600, 'reason': 600, 'details': 500, 'option': 60, 'why': 200}
 COLUMNS = ['id', 'split', 'sid', 'title', 'team', 'priority', 'due_h', 'created_h', 'started_h', 'completed_h', 'guide',
-           'reason', 'option', 'outcome', 'details', 'judged', 'confirmed', 'created_at', 'updated_at', 'completed_at']
+           'reason', 'option', 'outcome', 'details', 'judged', 'confirmed', 'created_at', 'updated_at', 'completed_at',
+           'stopped_h', 'stop_why', 'action', 'action_why']
+# 2026-10-21에 덧붙인 칸 (기존 표에 없으면 ALTER TABLE로 추가한다. 지우거나 바꾸지 않는다)
+#   stopped_h 작업 중단 시각 · stop_why 중단 사유 · action 실제 조치 · action_why 지시와 다르게 한 이유
+NEW_COLUMNS = {'stopped_h': 'REAL', 'stop_why': "TEXT NOT NULL DEFAULT ''", 'action': "TEXT NOT NULL DEFAULT ''",
+               'action_why': "TEXT NOT NULL DEFAULT ''"}
 _SID = re.compile(r'^S\d{4}$')
 _CTRL = re.compile(r'[\x00-\x08\x0b-\x1f\x7f]')     # 줄바꿈(\n, \x0a)은 남긴다
 
@@ -51,7 +61,8 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS tasks(
     started_h REAL, completed_h REAL, guide TEXT NOT NULL, reason TEXT NOT NULL, option TEXT NOT NULL,
     outcome TEXT NOT NULL DEFAULT '', details TEXT NOT NULL DEFAULT '', judged TEXT NOT NULL DEFAULT '',
     confirmed TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-    completed_at TEXT NOT NULL DEFAULT '')"""
+    completed_at TEXT NOT NULL DEFAULT '', stopped_h REAL, stop_why TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL DEFAULT '', action_why TEXT NOT NULL DEFAULT '')"""
 SETTINGS_SCHEMA = 'CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)'
 
 DEFAULT_GUIDE = ('① 안전 절차·작업 허가 확인\n'
@@ -76,9 +87,15 @@ def _hour(x):
     return h
 
 
-def _conflict(created_h, completed_h, new_h):
-    """같은 설비의 기존 작업이 새 배정과 겹치는가: 아직 완료 전이거나(재생에서 미래 작업 포함), 새 배정 시각에 열려 있다"""
-    return completed_h is None or (isinstance(completed_h, float) and math.isnan(completed_h)) or created_h <= new_h < completed_h
+def _missing(x):
+    return x is None or (isinstance(x, float) and math.isnan(x))
+
+
+def _conflict(created_h, completed_h, new_h, stopped_h=None):
+    """같은 설비의 기존 작업이 새 배정과 겹치는가: 아직 끝나기 전이거나(재생에서 미래 작업 포함), 새 배정 시각에 열려 있다.
+    끝 = 완료 시각, 완료 전에 중단했으면 중단 시각 (중단한 설비는 다시 배정할 수 있다)"""
+    end = completed_h if not _missing(completed_h) else (None if _missing(stopped_h) else stopped_h)
+    return end is None or created_h <= new_h < end
 
 
 def safe_csv(df):
@@ -123,6 +140,10 @@ class TaskStore:
             conn.execute('PRAGMA busy_timeout=20000')
             conn.execute(SCHEMA)
             conn.execute(SETTINGS_SCHEMA)
+            have = {r['name'] for r in conn.execute('PRAGMA table_info(tasks)').fetchall()}
+            for col, typ in NEW_COLUMNS.items():       # 예전 파일에 새 칸 덧붙이기
+                if col not in have:
+                    conn.execute(f'ALTER TABLE tasks ADD COLUMN {col} {typ}')
             yield conn
         finally:
             conn.close()
@@ -164,7 +185,7 @@ class TaskStore:
             with self._conn() as c:
                 df = pd.DataFrame([dict(r) for r in c.execute(f'SELECT * FROM {self.T} ORDER BY id').fetchall()],
                                   columns=COLUMNS)
-            for k in ('due_h', 'created_h', 'started_h', 'completed_h'):
+            for k in ('due_h', 'created_h', 'started_h', 'completed_h', 'stopped_h'):
                 df[k] = pd.to_numeric(df[k]).astype(float)
             df['id'] = df['id'].astype(int)
             if self.db:
@@ -172,6 +193,9 @@ class TaskStore:
         else:
             df = pd.DataFrame(self.rows, columns=COLUMNS)
         df = df.reindex(columns=COLUMNS).copy()
+        df['stopped_h'] = pd.to_numeric(df['stopped_h']).astype(float)
+        for k in ('stop_why', 'action', 'action_why'):
+            df[k] = df[k].fillna('').astype(str)
         return df[df['split'] == split].reset_index(drop=True) if split else df
 
     def frame(self, split, now):
@@ -180,34 +204,37 @@ class TaskStore:
         df = df[df['created_h'] <= now].copy()
         done = df['completed_h'].notna() & (df['completed_h'] <= now)
         started = df['started_h'].notna() & (df['started_h'] <= now)
+        stopped = ~done & df['stopped_h'].notna() & (df['stopped_h'] <= now)
         df['상태'] = '대기'
         df.loc[started, '상태'] = '진행 중'
         df.loc[done, '상태'] = '완료'
+        df.loc[stopped, '상태'] = '중단'
         late = ~done & (df['due_h'] < now)
         df['구분'] = '예정'
-        df.loc[~done & (df['due_h'] <= now), '구분'] = '지금'
+        df.loc[~done & ((df['due_h'] <= now) | started), '구분'] = '지금'     # 예정 시각 전에 시작했어도 지금 하는 일 (2026-10-21)
         df.loc[late & ~started, '구분'] = '지연'
         df.loc[done, '구분'] = '완료'
+        df.loc[stopped, '구분'] = '중단'
         return df.sort_values(['구분', 'priority', 'due_h', 'id'],
-                              key=lambda s: s.map({'지연': 0, '지금': 1, '예정': 2, '완료': 3, '긴급': 0, '높음': 1, '보통': 2})
+                              key=lambda s: s.map({'중단': 0, '지연': 1, '지금': 2, '예정': 3, '완료': 4, '긴급': 0, '높음': 1, '보통': 2})
                               if s.name in ('구분', 'priority') else s).reset_index(drop=True)
 
     def open_task(self, split, sid, now):
         """지금 시각에 열린(완료 전) 작업 한 줄 (없으면 None)"""
         df = self.frame(split, now)
-        df = df[(df['sid'] == sid) & (df['상태'] != '완료')]
+        df = df[(df['sid'] == sid) & ~df['상태'].isin(['완료', '중단'])]
         return None if df.empty else df.iloc[0].to_dict()
 
     def blocking(self, split, sid, now):
         """now에 이 설비로 배정하면 막는 작업 (add와 같은 규칙: 완료 전이거나 now에 열려 있던 작업). 없으면 None"""
         df = self.all(split)
         df = df[df['sid'] == sid]
-        hit = df[[_conflict(r.created_h, r.completed_h, now) for r in df.itertuples()]]
+        hit = df[[_conflict(r.created_h, r.completed_h, now, r.stopped_h) for r in df.itertuples()]]
         return None if hit.empty else hit.iloc[-1].to_dict()
 
     def blocked_sids(self, split, now):
         df = self.all(split)
-        return {r.sid for r in df.itertuples() if _conflict(r.created_h, r.completed_h, now)}
+        return {r.sid for r in df.itertuples() if _conflict(r.created_h, r.completed_h, now, r.stopped_h)}
 
     # 쓰기
 
@@ -225,16 +252,17 @@ class TaskStore:
                'created_h': _hour(created_h), 'started_h': None, 'completed_h': None,
                'guide': clean(guide, LIMITS['guide']), 'reason': clean(reason, LIMITS['reason']),
                'option': clean(option, LIMITS['option']), 'outcome': '', 'details': '', 'judged': '', 'confirmed': '',
-               'created_at': stamp, 'updated_at': stamp, 'completed_at': ''}
+               'created_at': stamp, 'updated_at': stamp, 'completed_at': '',
+               'stopped_h': None, 'stop_why': '', 'action': '', 'action_why': ''}
         keys = [k for k in COLUMNS if k != 'id']
         insert = f'INSERT INTO {self.T} ({",".join(keys)}) VALUES ({",".join("?" * len(keys))})'
-        select = f'SELECT created_h, completed_h FROM {self.T} WHERE split=? AND sid=?'
+        select = f'SELECT created_h, completed_h, stopped_h FROM {self.T} WHERE split=? AND sid=?'
         if self.db:
             self._cache = None
             with self._conn() as c:      # 한 트랜잭션: 이 설비의 잠금을 잡고(다른 사람의 동시 배정은 기다림) 확인하고 넣는다
                 c.execute('SELECT pg_advisory_xact_lock(hashtext(?))', [f'castpdm:{split}:{sid}'])
                 rows = c.execute(select, (split, sid)).fetchall()
-                if any(_conflict(r['created_h'], r['completed_h'], row['created_h']) for r in rows):
+                if any(_conflict(r['created_h'], r['completed_h'], row['created_h'], r['stopped_h']) for r in rows):
                     return False
                 c.execute(insert, [row[k] for k in keys])
             return True
@@ -243,7 +271,7 @@ class TaskStore:
                 c.execute('BEGIN IMMEDIATE')
                 try:
                     rows = c.execute(select, (split, sid)).fetchall()
-                    if any(_conflict(r['created_h'], r['completed_h'], row['created_h']) for r in rows):
+                    if any(_conflict(r['created_h'], r['completed_h'], row['created_h'], r['stopped_h']) for r in rows):
                         c.execute('ROLLBACK')
                         return False
                     c.execute(insert, [row[k] for k in keys])
@@ -252,7 +280,7 @@ class TaskStore:
                     c.execute('ROLLBACK')
                     raise
             return True
-        if any(_conflict(r['created_h'], r['completed_h'], row['created_h']) for r in self.rows
+        if any(_conflict(r['created_h'], r['completed_h'], row['created_h'], r.get('stopped_h')) for r in self.rows
                if r['split'] == split and r['sid'] == sid):
             return False
         row['id'] = max([r['id'] for r in self.rows], default=0) + 1
@@ -278,16 +306,34 @@ class TaskStore:
     def start(self, task_id, hour):
         return self._update(task_id, {'started_h': _hour(hour)}, where_open=True)
 
-    def complete(self, task_id, hour, outcome, details, judged='구분 못함', confirmed='아직 모름'):
-        """완료 보고: 결과와 수행 내용이 있어야 완료. 이미 완료된 작업이면 False"""
+    def complete(self, task_id, hour, outcome, details, judged='구분 못함', confirmed='아직 모름', action=ACTIONS[0], action_why=''):
+        """완료 보고: 결과와 수행 내용이 있어야 완료. 실제 조치가 지시(두 부품 교체)와 다르면 이유도 있어야 한다.
+        이미 완료된 작업이면 False"""
         details = clean(details, LIMITS['details'])
-        if outcome not in OUTCOMES or judged not in JUDGED or confirmed not in CONFIRMED:
-            raise ValueError('결과·부품은 정해진 값만')
+        action_why = clean(action_why, LIMITS['why'])
+        if outcome not in OUTCOMES or judged not in JUDGED or confirmed not in CONFIRMED or action not in ACTIONS:
+            raise ValueError('결과·부품·실제 조치는 정해진 값만')
         if not details:
             raise ValueError('수행 내용을 입력해야 완료할 수 있습니다')
+        if action != ACTIONS[0] and not action_why:
+            raise ValueError('지시(두 부품 교체)와 다르게 했으면 그 이유를 입력해야 완료할 수 있습니다')
         h = _hour(hour)
         return self._update(task_id, {'completed_h': h, 'outcome': outcome, 'details': details, 'judged': judged,
-                                      'confirmed': confirmed, 'completed_at': _now()}, where_open=True)
+                                      'confirmed': confirmed, 'completed_at': _now(), 'action': action,
+                                      'action_why': action_why if action != ACTIONS[0] else ''}, where_open=True)
+
+    def stop(self, task_id, hour, why):
+        """작업 중단 (작업자, 2026-10-21): 현장 상황이 지시와 달라 끝내지 못했을 때. 사유가 있어야 한다.
+        중단한 작업은 '중단'으로 남고 그 설비는 다시 배정할 수 있다. 완료됐거나 이미 중단한 작업이면 False"""
+        why = clean(why, LIMITS['why'])
+        if not why:
+            raise ValueError('중단 사유를 입력해야 중단할 수 있습니다')
+        h = _hour(hour)
+        df = self.all()
+        df = df[df['id'] == int(task_id)]
+        if df.empty or pd.notna(df.iloc[0]['stopped_h']):
+            return False
+        return self._update(task_id, {'stopped_h': h, 'stop_why': why}, where_open=True)
 
     def set_status(self, task_id, status, hour, outcome='', details='', judged='구분 못함', confirmed='아직 모름'):
         """설비관리자가 작업 상태를 직접 바꾼다 (잘못 누른 시작·완료 되돌리기 포함). 상태는 시작·완료 시각으로 정해진다.
@@ -301,7 +347,9 @@ class TaskStore:
         if df.empty or status not in STATUSES:
             raise ValueError('없는 작업이거나 정해진 상태가 아님')
         started = float(df.iloc[0]['started_h']) if pd.notna(df.iloc[0]['started_h']) else None
-        clear = {'completed_h': None, 'outcome': '', 'details': '', 'judged': '', 'confirmed': '', 'completed_at': ''}
+        # 상태를 고르면 중단도 풀린다 (중단한 작업을 다시 맡기는 경우)
+        clear = {'completed_h': None, 'outcome': '', 'details': '', 'judged': '', 'confirmed': '', 'completed_at': '',
+                 'stopped_h': None, 'stop_why': '', 'action': '', 'action_why': ''}
         if status == '대기':
             return self._update(task_id, {'started_h': None, **clear})
         if status == '진행 중':
@@ -313,7 +361,8 @@ class TaskStore:
             raise ValueError('수행 내용을 입력해야 완료할 수 있습니다')
         return self._update(task_id, {'started_h': started if started is not None else h, 'completed_h': max(h, started or h),
                                       'outcome': outcome, 'details': details, 'judged': judged, 'confirmed': confirmed,
-                                      'completed_at': _now()})
+                                      'completed_at': _now(), 'stopped_h': None, 'stop_why': '', 'action': ACTIONS[0],
+                                      'action_why': ''})
 
     def cancel(self, task_id):
         """배정 취소 (설비관리자): 완료 전 작업만 지운다. 그 설비는 다시 '배정할 경보'로 돌아간다.

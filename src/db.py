@@ -34,6 +34,9 @@ DDL = [
     f"""CREATE TABLE IF NOT EXISTS {SCHEMA}.settings(
         key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)""",
     *[f'ALTER TABLE {SCHEMA}.{t} ENABLE ROW LEVEL SECURITY' for t in ('tasks', 'action_log', 'settings')],
+    # 2026-10-21에 덧붙인 칸 (작업 중단·실제 조치). 이미 있으면 건너뛴다. 기존 기록은 지우거나 바꾸지 않는다
+    f'ALTER TABLE {SCHEMA}.tasks ADD COLUMN IF NOT EXISTS stopped_h DOUBLE PRECISION',
+    *[f"ALTER TABLE {SCHEMA}.tasks ADD COLUMN IF NOT EXISTS {c} TEXT NOT NULL DEFAULT ''" for c in ('stop_why', 'action', 'action_why')],
 ]
 
 

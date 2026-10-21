@@ -52,11 +52,12 @@ CONFIRMED = ['valve', 'oscillator', '아직 모름']
 LIMITS = {'title': 80, 'guide': 600, 'reason': 600, 'details': 500, 'option': 60, 'why': 200}
 COLUMNS = ['id', 'split', 'sid', 'title', 'team', 'priority', 'due_h', 'created_h', 'started_h', 'completed_h', 'guide',
            'reason', 'option', 'outcome', 'details', 'judged', 'confirmed', 'created_at', 'updated_at', 'completed_at',
-           'stopped_h', 'stop_why', 'action', 'action_why', 'members']
+           'stopped_h', 'stop_why', 'action', 'action_why', 'members', 'leader', 'checks']
 # 2026-10-21에 덧붙인 칸 (기존 표에 없으면 ALTER TABLE로 추가한다. 지우거나 바꾸지 않는다)
 #   stopped_h 작업 중단 시각 · stop_why 중단 사유 · action 실제 조치 · action_why 지시와 다르게 한 이유
 NEW_COLUMNS = {'stopped_h': 'REAL', 'stop_why': "TEXT NOT NULL DEFAULT ''", 'action': "TEXT NOT NULL DEFAULT ''",
-               'action_why': "TEXT NOT NULL DEFAULT ''", 'members': "TEXT NOT NULL DEFAULT ''"}   # members: 배정한 작업자 (쉼표로)
+               'action_why': "TEXT NOT NULL DEFAULT ''", 'members': "TEXT NOT NULL DEFAULT ''",   # members: 배정한 작업자 (쉼표로)
+               'leader': "TEXT NOT NULL DEFAULT ''", 'checks': "TEXT NOT NULL DEFAULT ''"}   # 작업책임자 · 체크리스트 상태(JSON)
 _SID = re.compile(r'^S\d{4}$')
 _CTRL = re.compile(r'[\x00-\x08\x0b-\x1f\x7f]')     # 줄바꿈(\n, \x0a)은 남긴다
 
@@ -67,7 +68,8 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS tasks(
     outcome TEXT NOT NULL DEFAULT '', details TEXT NOT NULL DEFAULT '', judged TEXT NOT NULL DEFAULT '',
     confirmed TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
     completed_at TEXT NOT NULL DEFAULT '', stopped_h REAL, stop_why TEXT NOT NULL DEFAULT '',
-    action TEXT NOT NULL DEFAULT '', action_why TEXT NOT NULL DEFAULT '', members TEXT NOT NULL DEFAULT '')"""
+    action TEXT NOT NULL DEFAULT '', action_why TEXT NOT NULL DEFAULT '', members TEXT NOT NULL DEFAULT '',
+    leader TEXT NOT NULL DEFAULT '', checks TEXT NOT NULL DEFAULT '')"""
 ABSENCE_SCHEMA = """CREATE TABLE IF NOT EXISTS absences(
     id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, team TEXT NOT NULL, kind TEXT NOT NULL,
     start_h REAL NOT NULL, end_h REAL NOT NULL, note TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL)"""
@@ -75,7 +77,7 @@ ABSENCE_COLUMNS = ['id', 'name', 'team', 'kind', 'start_h', 'end_h', 'note', 'up
 SETTINGS_SCHEMA = 'CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)'
 
 DEFAULT_GUIDE = ('① 안전 절차·작업 허가 확인\n'
-                 '② 설비 정지와 잠금(LOTO) 확인\n'
+                 '② 설비 정지와 ILS 절차 준수 여부 확인\n'
                  '③ 진동장치·밸브 상태 점검 (센서로는 원인 부품을 구분할 수 없어 두 부품 모두 확인)\n'
                  '④ 교체 뒤 몰드 레벨·제어 지연·인발 부하·진동 스트로크 신호 확인\n'
                  '⑤ 어느 부품이 문제였는지 완료 보고에 기록')
@@ -103,6 +105,14 @@ def _members(team, members):
     if bad:
         raise ValueError(f'{team} 팀원이 아님: {", ".join(bad)}')
     return ','.join(dict.fromkeys(names))
+
+
+def pick_leader(members, leader):
+    """작업책임자: 작업자 중 한 명. 비었으면 작업자 중 반장, 없으면 첫 사람"""
+    names = [m for m in str(members).split(',') if m]
+    if leader in names:
+        return leader
+    return next((m for m in names if m in LEADERS.values()), names[0] if names else '')
 
 
 def _missing(x):
@@ -261,7 +271,7 @@ class TaskStore:
             df = pd.DataFrame(self.rows, columns=COLUMNS)
         df = df.reindex(columns=COLUMNS).copy()
         df['stopped_h'] = pd.to_numeric(df['stopped_h']).astype(float)
-        for k in ('stop_why', 'action', 'action_why', 'members'):
+        for k in ('stop_why', 'action', 'action_why', 'members', 'leader', 'checks'):
             df[k] = df[k].fillna('').astype(str)
         return df[df['split'] == split].reset_index(drop=True) if split else df
 
@@ -305,13 +315,14 @@ class TaskStore:
 
     # 쓰기
 
-    def add(self, split, sid, title, team, priority, due_h, created_h, guide, reason, option='', members=()):
+    def add(self, split, sid, title, team, priority, due_h, created_h, guide, reason, option='', members=(), leader=''):
         """작업 배정. 같은 설비에 지금 열린 작업이 있으면 넣지 않고 False. members: 배정한 작업자 (그 팀 사람만)"""
         if split not in ('test', 'validation') or not _SID.match(str(sid)):
             raise ValueError('데이터 세트·설비 ID 형식이 아님')
         if team not in TEAMS or priority not in PRIORITIES:
             raise ValueError('팀·우선순위는 정해진 값만')
         members = _members(team, members)
+        leader = pick_leader(members, leader)
         title = clean(title, LIMITS['title'])
         if not title:
             raise ValueError('작업명을 입력하세요')
@@ -321,7 +332,8 @@ class TaskStore:
                'guide': clean(guide, LIMITS['guide']), 'reason': clean(reason, LIMITS['reason']),
                'option': clean(option, LIMITS['option']), 'outcome': '', 'details': '', 'judged': '', 'confirmed': '',
                'created_at': stamp, 'updated_at': stamp, 'completed_at': '',
-               'stopped_h': None, 'stop_why': '', 'action': '', 'action_why': '', 'members': members}
+               'stopped_h': None, 'stop_why': '', 'action': '', 'action_why': '', 'members': members, 'leader': leader,
+               'checks': ''}
         keys = [k for k in COLUMNS if k != 'id']
         insert = f'INSERT INTO {self.T} ({",".join(keys)}) VALUES ({",".join("?" * len(keys))})'
         select = f'SELECT created_h, completed_h, stopped_h FROM {self.T} WHERE split=? AND sid=?'
@@ -390,6 +402,10 @@ class TaskStore:
                                       'confirmed': confirmed, 'completed_at': _now(), 'action': action,
                                       'action_why': action_why if action != ACTIONS[0] else ''}, where_open=True)
 
+    def set_checks(self, task_id, checks):
+        """작업 상세의 체크리스트 상태 저장 (JSON 문자열, 2026-10-21). 기기를 바꿔도 남고 설비관리자가 진행률을 본다"""
+        return self._update(task_id, {'checks': str(checks)[:4000]})
+
     def stop(self, task_id, hour, why):
         """작업 중단 (작업자, 2026-10-21): 현장 상황이 지시와 달라 끝내지 못했을 때. 사유가 있어야 한다.
         중단한 작업은 '중단'으로 남고 그 설비는 다시 배정할 수 있다. 완료됐거나 이미 중단한 작업이면 False"""
@@ -453,9 +469,11 @@ class TaskStore:
         return self._update(task_id, {'outcome': outcome, 'details': details, 'judged': judged, 'confirmed': confirmed},
                             where_done=True)
 
-    def edit(self, task_id, team, priority, due_h, guide, reason, members=None):
+    def edit(self, task_id, team, priority, due_h, guide, reason, members=None, leader=None):
         if team not in TEAMS or priority not in PRIORITIES:
             raise ValueError('팀·우선순위는 정해진 값만')
         extra = {} if members is None else {'members': _members(team, members)}
+        if members is not None:
+            extra['leader'] = pick_leader(extra['members'], leader or '')
         return self._update(task_id, {**extra, 'team': team, 'priority': priority, 'due_h': _hour(due_h),
                                       'guide': clean(guide, LIMITS['guide']), 'reason': clean(reason, LIMITS['reason'])})

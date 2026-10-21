@@ -24,6 +24,7 @@
 온톨로지 (src/ontology.py, OWL/RDF): 지금 시각의 설비·예측·신호·경보·정비 결정·조치를 한 그래프로 잇는다.
 """
 
+import json
 import re
 import sys
 from dataclasses import replace
@@ -989,20 +990,28 @@ def start_task(tid, sid):
         st.toast(f'{sid}: 작업 시작', icon=':material/play_arrow:')
 
 
-def urgent_start(sid, team, option):
-    """즉시 조치 설비: 배정 전이라도 현장이 바로 시작한다 (안전이 먼저). 작업을 만들고 시작까지 기록"""
-    ok = TASKS.add(split, sid, f'{sid} 즉시 조치: 두 부품 교체', team, '긴급', now, now, tasks.DEFAULT_GUIDE,
-                   '지금 교체해도 완료 전 고장 확률이 안전 기준을 넘음 → 배정 전 긴급 시작', option)
-    if ok:
-        start_task(TASKS.open_task(split, sid, now)['id'], sid)
-    else:
-        st.toast(f'{sid}: 이미 열린 작업이 있습니다', icon=':material/info:')
+def urgent_create(sid, team, option):
+    """즉시 조치 설비 (2026-10-21 7차): 배정 전이라도 현장이 작업을 만들고 그 작업 상세로 간다 (안전이 먼저).
+    바로 시작하지 않는다: 관리자 구두 승인 · 설비 정지 · TBM 등 사전 절차를 체크해야 작업 시작이 켜진다"""
+    absent = TASKS.absent_at(now)
+    mem = [m for m in tasks.TEAMS[team] if m not in absent][:4]
+    try:
+        ok = TASKS.add(split, sid, f'{sid} 즉시 조치: 두 부품 교체', team, '긴급', now, now, tasks.DEFAULT_GUIDE,
+                       '지금 교체해도 완료 전 고장 확률이 안전 기준을 넘음 → 배정 전 현장이 긴급 작업을 만듦', option, mem)
+    except ValueError as e:
+        st.toast(str(e), icon=':material/error:')
+        return
+    if not ok:
+        st.toast(f'{nm(sid)}: 이미 열린 작업이 있습니다', icon=':material/info:')
+        return
+    w_open_task(int(TASKS.open_task(split, sid, now)['id']))
+    st.toast(f'{nm(sid)}: 즉시 조치 작업을 만들었습니다 · 사전 절차를 체크하세요', icon=':material/emergency:')
 
 
-def assign_task(sid, title, team, priority, due_h, guide, reason, option, members=()):
+def assign_task(sid, title, team, priority, due_h, guide, reason, option, members=(), leader=''):
     """작업 배정 = 정비 결정 승인 + 작업 지시 (같은 설비에 열린 작업이 있으면 배정하지 않는다)"""
     try:
-        ok = TASKS.add(split, sid, title, team, priority, due_h, now, guide, reason, option, members)
+        ok = TASKS.add(split, sid, title, team, priority, due_h, now, guide, reason, option, members, leader)
     except ValueError as e:
         st.toast(str(e), icon=':material/error:')
         return
@@ -1077,14 +1086,14 @@ def order_buttons(sid, sstage, alarm, rec, cfg, W):
                       help=f'{cfg.parts.rush_h:.0f}시간 안에 도착, 웃돈 부품값의 {cfg.parts.rush_markup:.0%}')
 
 
-def assign_from_card(sid, team_key, members_key, title, priority, due_h, reason, option):
-    """비용 칸의 '작업자 화면으로 배정' (콜백, 2026-10-21): 그 칸의 선택지·작업자로 배정. 점검 가이드·덧붙일 말은 '작업 내용 바꾸기'에서"""
+def assign_from_card(sid, team_key, members_key, leader_key, title, priority, due_h, reason, option):
+    """비용 칸의 '작업자 화면으로 배정' (콜백, 2026-10-21): 그 칸의 선택지·작업자·작업책임자로 배정. 점검 가이드·덧붙일 말은 '작업 내용 바꾸기'에서"""
     team = st.session_state.get(team_key, list(tasks.TEAMS)[0])
     members = list(st.session_state.get(members_key, []))
     guide = st.session_state.get(f'guide_txt_{sid}') or tasks.DEFAULT_GUIDE
     note = str(st.session_state.get(f'reason_txt_{sid}', '')).strip()
     assign_task(sid, title, team, priority, min(240.0, max(0.0, float(due_h))), guide, reason + (f' · {note}' if note else ''), option,
-                members)
+                members, st.session_state.get(leader_key, ''))
 
 
 def cancel_task(tid, sid, title, why_key):
@@ -1108,14 +1117,114 @@ def team_load(tf):
     return {k: int((o['team'] == k).sum()) for k in tasks.TEAMS}
 
 
+# 작업자 화면 단계 (2026-10-21 7차): 홈(지금·지연·예정·완료·중단 칸) → 구분별 목록 → 작업 상세(체크리스트) → 완료 보고 / 작업 중단
+W_LISTS = {'지금': (':material/play_circle:', '예정 시각이 됐거나 이미 시작한 작업'),
+           '지연': (':material/schedule:', '예정 시각이 지났는데 아직 시작하지 않은 작업'),
+           '예정': (':material/event:', '아직 예정 시각 전인 작업 (보기만)'),
+           '완료': (':material/task_alt:', '완료 보고한 작업'),
+           '중단': (':material/stop_circle:', '현장에서 중단한 작업')}
+W_SCREENS = ('detail', 'report', 'stop')
+
+# 작업 상세 체크리스트 (2026-10-21 7차, 사용자 현장 설명대로)
+#   사전 절차: ① 작업 허가서(전날 정비 범위 미팅에서 전산 입력, 당일 출력) → ② 설비 정지 → ③ TBM(하위 6개 순서 자유, 다 체크해야 'TBM 완료')
+#             ④ 부품·공구(순서 자유). 전부 체크해야 [작업 시작]. 즉시 조치는 ①을 관리자 구두 승인으로 (허가서는 사후 처리)
+#   정비 중: 작업책임자가 10대 안전철칙마다 준수 / 해당 없음을 고른다. 작업 시작 전에는 잠금
+#   정비 후: ①~④ 순서대로, ⑤⑥은 자유. 정비 중 10개를 다 골라야 열린다. 전부 끝나야 [완료 보고 작성]
+#   체크 상태는 작업 표 checks 칸(JSON)에 바로 저장한다 → 기기를 바꿔도 남고 설비관리자가 진행률을 본다
+TBM_ITEMS = [('tbm_share', '작업 내용 · 위험 요인 · 역할 분담 공유'), ('tbm_ils', 'ILS 절차 준수 여부 확인'), ('tbm_press', '잔압 제거'),
+             ('tbm_power', '전원 차단'), ('tbm_valve', '밸브 차단'), ('tbm_ppe', '보호구 착용 확인')]
+PRE_KEYS = ['permit', 'halt', *[k for k, _ in TBM_ITEMS], 'tbm_done', 'parts']
+SAFETY_RULES = [('절대 금지', '가동설비 접근 및 점검·수리 금지'), ('절대 금지', '추락위험개소 안전대 미체결 시 진입 금지'),
+                ('절대 금지', '폭발·인화성 물질 주변 화기 취급 금지'), ('절대 금지', '중량물·중장비 작업반경 내 접근 금지'),
+                ('절대 금지', '산소·유해가스 측정 전 밀폐공간 진입 금지'), ('절대 금지', '전원 차단 및 검전 전 전기 작업 금지'),
+                ('절대 실행', '작업 중 지적확인 (위험 시 작업중지권 사용)'), ('절대 실행', '수리 작업 시 ILS 절차 준수'),
+                ('절대 실행', '모든 작업 시 안전 CCTV 촬영'), ('절대 실행', '규정에 맞는 안전보호구 착용')]
+SAFETY_KEYS = [f's{i}' for i in range(1, len(SAFETY_RULES) + 1)]
+SAFETY_OPTS = ['준수', '해당 없음']
+POST_ITEMS = [('clean', '① 공구·이물질 회수, 작업 구역 정리'), ('evac', '② 작업자 전원 철수 확인'), ('ils_off', '③ ILS 해제와 관계자 통보'),
+              ('trial', '④ 시운전'), ('signal', '⑤ 몰드 레벨 · 제어 지연 · 인발 부하 · 진동 스트로크 신호 확인'),
+              ('cause', '⑥ 원인 부품 확인 (완료 보고에 기록)')]
+POST_KEYS = [k for k, _ in POST_ITEMS]
+POST_ORDER = POST_KEYS[:4]
+CHECK_TOTAL = len(PRE_KEYS) + len(SAFETY_KEYS) + len(POST_KEYS)
+
+
+def load_checks(raw):
+    """작업 표 checks 칸(JSON) → dict. 비었거나 깨졌으면 빈 dict"""
+    try:
+        d = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        d = {}
+    return d if isinstance(d, dict) else {}
+
+
+def check_count(d):
+    """체크한 항목 수 (사전 · 정비 중 · 정비 후)"""
+    return (sum(bool(d.get(k)) for k in PRE_KEYS) + sum(d.get(k) in SAFETY_OPTS for k in SAFETY_KEYS)
+            + sum(bool(d.get(k)) for k in POST_KEYS))
+
+
+def fix_checks(d):
+    """순서 규칙: 앞 항목을 풀면 뒤 항목도 푼다 (사전 ①→②→③, TBM 하위 → TBM 완료, 정비 후 ①→④)"""
+    if not d.get('permit'):
+        d['halt'] = False
+    if not d.get('halt'):
+        d.update({k: False for k, _ in TBM_ITEMS})
+    if not all(d.get(k) for k, _ in TBM_ITEMS):
+        d['tbm_done'] = False
+    for a, b in zip(POST_ORDER, POST_ORDER[1:]):
+        if not d.get(a):
+            d[b] = False
+    return d
+
+
+def save_checks(tid, extra):
+    """체크 하나를 바꿀 때마다 (콜백): 순서 규칙을 맞추고 작업 표에 바로 저장한다. extra: 위젯이 아닌 저장값(허가서 사후 처리 등)"""
+    pre = f'ck{tid}_'
+    d = {k: bool(st.session_state.get(pre + k)) for k in PRE_KEYS + POST_KEYS}
+    d.update({k: st.session_state.get(pre + k) for k in SAFETY_KEYS})
+    d = fix_checks(d)
+    for k in PRE_KEYS + POST_KEYS:
+        st.session_state[pre + k] = d[k]
+    TASKS.set_checks(tid, json.dumps({**extra, **{k: v for k, v in d.items() if v}}, ensure_ascii=False))
+
+
+def w_go(view=None):
+    """작업자 화면 단계로 (None = 홈, 지금·지연·예정·완료·중단 = 목록, detail·report·stop = 작업 하나)"""
+    st.session_state['wv'] = view
+    st.session_state['w_scroll'] = True
+
+
+def w_open_task(tid):
+    """'배정된 작업 보기': 작업 상세로 (돌아올 목록을 기억한다)"""
+    if st.session_state.get('wv') in W_LISTS:
+        st.session_state['w_back'] = st.session_state['wv']
+    elif st.session_state.get('wv') is None:
+        st.session_state['w_back'] = None
+    st.session_state['w_tid'] = tid
+    w_go('detail')
+
+
+def is_urgent_job(r):
+    return r['priority'] == '긴급' or '즉시 조치' in str(r['title'])
+
+
+def people(r):
+    """작업자 이름 (작업책임자 표시)"""
+    lead = r['leader'] or tasks.pick_leader(r['members'], '')
+    return ' · '.join(m + (' (작업책임자)' if m == lead else '') for m in str(r['members']).split(',') if m)
+
+
 def task_line(r):
-    """작업 한 줄 (카드 목록용)"""
+    """작업 한 줄 (작업자 목록 카드): 요약 + '배정된 작업 보기'"""
     with st.container(border=True):
         st.markdown(f'**#{int(r["id"])} {r["title"] if str(r["title"]).startswith(r["sid"]) else r["sid"] + " — " + r["title"]}**  \n'
                     + ' '.join([PRIORITY_BADGE.get(r['priority'], ''), TASK_BADGE.get(r['상태'], ''),
                                 ':red-badge[지연]' if r['구분'] == '지연' else '', f':gray-badge[{r["team"]}]',
-                                f':gray-badge[:material/group: {r["members"].replace(",", " · ")}]' if r['members'] else '',
-                                f':blue-badge[{nm(r["sid"])}]']))
+                                f':gray-badge[:material/group: {people(r)}]' if r['members'] else '',
+                                f':blue-badge[{nm(r["sid"])}]',
+                                f':violet-badge[:material/checklist: 체크 {check_count(load_checks(r["checks"]))}/{CHECK_TOTAL}]'
+                                if r['상태'] in ('대기', '진행 중') and r['checks'] else '']))
         st.caption(f'예정 {clock(r["due_h"])} · 배정 {clock(r["created_h"])}'
                    + (f' · 완료 {clock(r["completed_h"])}' if pd.notna(r['completed_h']) and r['상태'] == '완료' else '')
                    + (f' · {r["reason"]}' if r['reason'] else ''))
@@ -1126,9 +1235,8 @@ def task_line(r):
                         + (f'  \n:orange[지시와 다름 · {r["action_why"]}]' if r['action_why'] else ''))
         elif r['상태'] == '중단':
             st.markdown(f':orange[작업 중단 {clock(r["stopped_h"])} · 사유: {r["stop_why"]}]')
-        else:
-            st.button('이 작업 먼저', key=f'focus_{int(r["id"])}', icon=':material/push_pin:',
-                      on_click=lambda i=int(r['id']): st.session_state.update({'focus_tid': i}))
+        st.button('배정된 작업 보기', key=f'wopen_{int(r["id"])}', icon=':material/arrow_forward:',
+                  type='primary' if r['구분'] in ('지금', '지연') else 'secondary', on_click=w_open_task, args=(int(r['id']),))
 
 
 # 알림: 다른 사람이 한 일 (설비관리자 ← 완료 보고, 작업자 ← 새 배정). 재생 시각을 옮겨서 바뀐 것은 알리지 않는다
@@ -1199,6 +1307,11 @@ def task_editor(tf):
             cur_mem = [m for m in str(cur['members']).split(',') if m in tasks.TEAMS[cur['team']]]
             e_mem = st.multiselect('작업자 (팀을 바꾸면 저장할 때 새 팀원만 남깁니다)', [m for v in tasks.TEAMS.values() for m in v], default=cur_mem,
                                    format_func=lambda m: f'{m} · {tasks.TEAM_OF[m]}')
+            all_people = [m for v in tasks.TEAMS.values() for m in v]
+            cur_lead = cur['leader'] or tasks.pick_leader(cur['members'], '')
+            e_lead = st.selectbox('작업책임자 (작업자 중 한 명, 아니면 저장할 때 반장 · 첫 사람으로 정해집니다)', all_people,
+                                  index=all_people.index(cur_lead) if cur_lead in all_people else 0,
+                                  format_func=lambda m: f'{m} · {tasks.TEAM_OF[m]}')
             e_prio = c2.selectbox('우선순위', tasks.PRIORITIES, index=tasks.PRIORITIES.index(cur['priority']))
             e_due = c3.selectbox('시작 예정', list(range(241)), index=min(240, int(round(cur['due_h']))), format_func=clock)
             e_guide = st.text_area('점검 가이드', value=cur['guide'], max_chars=tasks.LIMITS['guide'])
@@ -1221,7 +1334,7 @@ def task_editor(tf):
                     st.error('수정 사유를 입력해야 저장됩니다.', icon=':material/error:')
                 elif e_state != '완료' or done_ or pick_ok(e_at, lo_e, now):
                     try:
-                        TASKS.edit(tid, e_team, e_prio, e_due, e_guide, e_reason, [m for m in e_mem if tasks.TEAM_OF[m] == e_team])
+                        TASKS.edit(tid, e_team, e_prio, e_due, e_guide, e_reason, [m for m in e_mem if tasks.TEAM_OF[m] == e_team], e_lead)
                         if e_state != cur['상태']:
                             # 상태 변경: 작업 기록을 바꾸고, 진행 단계 기록(src/actions.py)에도 남겨 화면 전체가 같은 상태를 본다
                             if e_state == '완료':
@@ -1259,7 +1372,30 @@ def task_editor(tf):
                                       help='작업 목록에서 빠지고, 설비는 다시 배정할 경보로 돌아갑니다')
 
 
-# 0. 작업자: 내 작업 (지금 할 일 하나 → 시작 → 완료 보고)
+# 누르는 지표 칸 모양 (st.metric 칸과 비슷하게: 왼쪽 위 이름, 아래 큰 숫자)과 조치 안내 칸 바탕색. 작업자·설비관리자가 같이 쓴다. 고정된 글만 넣는다
+CARD_CSS = ('<style>'
+            '[class*="st-key-card_"] button { min-height: 132px; justify-content: flex-start; align-items: flex-start; padding: 16px 20px; }'
+            '[class*="st-key-card_"] button > div, [class*="st-key-card_"] button [data-testid="stMarkdownContainer"] '
+            '{ width: 100%; justify-content: flex-start; text-align: left; }'
+            '[class*="st-key-card_"] button p { line-height: 1.25; }'
+            '[class*="st-key-card_"] button strong { font-size: 2.25rem; font-weight: 500; display: block; margin-top: 10px; }'
+            # 조치 안내 칸: 알림 상자처럼 연한 바탕 (라이트·다크 모두 보이게 반투명)
+            '.st-key-guide_red { background: rgba(255,102,122,0.10); border-color: rgba(255,102,122,0.45) !important; }'
+            '.st-key-guide_orange { background: rgba(247,185,85,0.12); border-color: rgba(247,185,85,0.5) !important; }'
+            '.st-key-guide_green { background: rgba(45,212,160,0.10); border-color: rgba(45,212,160,0.45) !important; }'
+            '[class*="st-key-guide_"] [data-testid="stMetricValue"] { font-variant-numeric: tabular-nums; }'
+            '</style>')
+
+
+def scroll_to_top():
+    """화면 단계를 바꾸면 맨 위(경로)부터 보이게. 고정된 글(사용자 입력 없음)만 넣는다"""
+    st.iframe('<script>const d = window.parent.document;'
+              '["[data-testid=stMain]", "[data-testid=stAppViewContainer]", "section.main"]'
+              '.forEach(q => { const e = d.querySelector(q); if (e) e.scrollTo(0, 0); });'
+              'window.parent.scrollTo(0, 0);</script>', height=1)
+
+
+# 0. 작업자: 내 작업 (2026-10-21 7차) 홈 칸 5개 → 구분별 목록 → 작업 상세(체크리스트 → 작업 시작) → 완료 보고 / 작업 중단
 
 page = None
 if role == WORKER:
@@ -1272,52 +1408,188 @@ if role == WORKER:
     W = work_plan(A, t)
     dec, cfg, costs = W['dec'], W['cfg'], W['costs']
     tf = TASKS.frame(split, now)
-    st.session_state.setdefault('my_team', list(tasks.TEAMS)[0])
-    with st.container(horizontal=True, vertical_alignment='center'):
-        st.subheader('내 작업', icon=':material/checklist:')
-        st.space('stretch')
-        team = st.segmented_control('내 팀', list(tasks.TEAMS), key='my_team', required=True, label_visibility='collapsed',
-                                    disabled=LOCKED_WORKER,
-                                    help='팀원: ' + ' / '.join(f'{k} ' + '·'.join(v) for k, v in tasks.TEAMS.items()))
-    mine = tf[tf['team'] == team]
-    open_ = mine[~mine['상태'].isin(['완료', '중단'])]
-    open_ = open_.assign(_r=(open_['상태'] != '진행 중').astype(int)).sort_values('_r', kind='stable')
     dec_i = dec.set_index('설비 (시나리오)') if len(dec) else pd.DataFrame()
-    busy = TASKS.blocked_sids(split, now)
-    js = LOG.job_state(split, now, MNT_START)
-    done_ = {x for x, v in js.items() if v == '작업 완료'}     # 이번 운전 구간에서 이미 교체를 마친 설비
-    urgent_un = [x for x in dec_i.index if dec_i.loc[x, '제약'].startswith('즉시') and x not in busy | done_] if len(dec_i) else []
-    ft = st.session_state.get('focus_tid')
-    focus = open_[open_['id'] == ft].iloc[0] if ft in set(open_['id']) else (open_.iloc[0] if len(open_) else None)
+    st.session_state.setdefault('my_team', list(tasks.TEAMS)[0])
+    if st.session_state.pop('w_scroll', False):
+        scroll_to_top()
+    st.html(CARD_CSS)
+    wv = st.session_state.get('wv')
+    if wv not in (None, *W_LISTS, *W_SCREENS):
+        wv = None
+    if wv in W_SCREENS:     # 작업이 없어졌거나(배정 취소) 다른 팀 작업이면 홈으로
+        mine_ids = set(tf.loc[tf['team'] == st.session_state['my_team'], 'id'])
+        if st.session_state.get('w_tid') not in mine_ids:
+            wv = st.session_state['wv'] = None
 
-    with st.container(border=True):
-        if focus is not None:
-            sid = focus['sid']
+    # 머리말: 홈이면 '내 작업' + 팀, 아래 단계면 돌아가는 경로 + 팀 이름
+    with st.container(horizontal=True, vertical_alignment='center', gap='small'):
+        if wv is None:
+            st.subheader('내 작업', icon=':material/checklist:')
+        elif wv in W_LISTS:
+            st.button('내 작업', icon=':material/arrow_back:', type='tertiary', key='w_back_home', on_click=w_go)
+            st.markdown(f'/ &nbsp;{W_LISTS[wv][0]} **{wv}**')
+        else:
+            back = st.session_state.get('w_back')
+            if wv == 'detail':
+                st.button(back or '내 작업', icon=':material/arrow_back:', type='tertiary', key='w_back_list', on_click=w_go, args=(back,))
+                st.markdown(f'/ &nbsp;**작업 #{st.session_state["w_tid"]}**')
+            else:
+                st.button(f'작업 #{st.session_state["w_tid"]}', icon=':material/arrow_back:', type='tertiary', key='w_back_detail',
+                          on_click=w_go, args=('detail',))
+                st.markdown('/ &nbsp;**' + ('완료 보고' if wv == 'report' else '작업 중단') + '**')
+        st.space('stretch')
+        # 44: 구글 로그인 작업자는 자기 팀 이름만 (버튼 없음). 로그인 없는 화면 · 설비관리자가 보는 작업자 화면은 두 팀을 고를 수 있다
+        if LOCKED_WORKER or wv is not None:
+            st.markdown(f':blue-badge[:material/groups: {st.session_state["my_team"]}]')
+        else:
+            # 고르는 칸(team_pick)과 고른 팀(my_team)을 나눈다: 아래 단계에서는 이 칸을 그리지 않아 칸 값이 지워지기 때문
+            st.session_state['team_pick'] = st.session_state['my_team']
+            st.segmented_control('내 팀', list(tasks.TEAMS), key='team_pick', required=True, label_visibility='collapsed',
+                                 on_change=lambda: st.session_state.update(my_team=st.session_state['team_pick']),
+                                 help='팀원: ' + ' / '.join(f'{k} ' + '·'.join(v) for k, v in tasks.TEAMS.items()))
+    team = st.session_state['my_team']
+    mine = tf[tf['team'] == team]
+
+    if wv is None:
+        # 배정 전 즉시 조치 설비: 홈 칸 위에 빨간 알림. 누르면 작업을 만들고 그 작업 상세로 (시작은 사전 절차 뒤)
+        busy = TASKS.blocked_sids(split, now)
+        js = LOG.job_state(split, now, MNT_START)
+        done_ = {x for x, v in js.items() if v == '작업 완료'}     # 이번 운전 구간에서 이미 교체를 마친 설비
+        urgent_un = [x for x in dec_i.index if dec_i.loc[x, '제약'].startswith('즉시') and x not in busy | done_] if len(dec_i) else []
+        if urgent_un:
+            with st.container(border=True, key='guide_red'):
+                st.markdown(f'#### :red[:material/emergency: 배정 전 즉시 조치 {len(urgent_un)}대]')
+                st.markdown('지금 교체해도 완료 전 고장 확률이 안전 기준을 넘습니다. 안전이 먼저라 설비관리자 배정을 기다리지 않고 '
+                            '작업을 만들 수 있습니다. 관리자 구두 승인을 받은 뒤 사전 절차를 체크하세요 (작업 허가서는 사후 처리).')
+                with st.container(horizontal=True):
+                    for sid in urgent_un:
+                        st.button(f'{nm(sid)} 즉시 조치 작업 만들기', key=f'urg_{sid}', icon=':material/emergency:', type='primary',
+                                  on_click=urgent_create, args=(sid, team, dec_i.loc[sid, '추천']))
+        cnt = mine['구분'].value_counts()
+        for col, (k, (ic, help_)) in zip(st.columns(len(W_LISTS)), W_LISTS.items()):
+            with col:
+                st.button(f'{ic} {k} :material/chevron_right:\n\n**{cnt.get(k, 0)}**', key=f'card_w_{k}', width='stretch',
+                          on_click=w_go, args=(k,), help=help_)
+        st.caption('재생 시각 기준: 지금 = 예정 시각이 됐거나 이미 시작함 · 지연 = 예정 시각이 지났는데 시작 전 · 예정 = 아직 · '
+                   + STORE_NOTE)
+
+    elif wv in W_LISTS:
+        rows = mine[mine['구분'] == wv]
+        if wv == '지금':    # 진행 중인 작업 먼저
+            rows = rows.assign(_r=(rows['상태'] != '진행 중').astype(int)).sort_values('_r', kind='stable')
+        st.caption(W_LISTS[wv][1] + f' · {len(rows)}건')
+        if rows.empty:
+            st.markdown('##### :material/check_circle: 없습니다')
+            st.caption('설비관리자가 배정하면 지금·예정에 나타납니다.' if wv in ('지금', '예정') else '')
+        for _, r in rows.iterrows():
+            task_line(r)
+
+    else:
+        r = mine.set_index('id').loc[st.session_state['w_tid']]
+        tid, sid = int(st.session_state['w_tid']), r['sid']
+        urgent_job = is_urgent_job(r)
+        saved = load_checks(r['checks'])
+        extra = {k: v for k, v in saved.items() if k not in PRE_KEYS + SAFETY_KEYS + POST_KEYS}
+
+        if wv == 'detail':
             info = dec_i.loc[sid] if sid in dec_i.index else None
             plan_part = info['_e'].get('plan_part') if info is not None else None
-            need = PARTS if not str(focus['option']).startswith('다음 정기') else [q for q in PARTS if q != plan_part]
+            need = PARTS if not str(r['option']).startswith('다음 정기') else [q for q in PARTS if q != plan_part]
             miss_ = missing_parts(W['stock'][sid], need)
-            st.caption(f'지금 할 일 · {team} · 작업 #{int(focus["id"])}')
-            st.markdown(f'### {focus["title"] if str(focus["title"]).startswith(sid) else sid + " — " + focus["title"]}')
-            st.markdown(f':blue-badge[:material/precision_manufacturing: {nm(sid)}]'
-                        + (f' :gray-badge[:material/group: 작업자 {focus["members"].replace(",", " · ")}]' if focus['members'] else ''))
-            st.markdown(' '.join(x for x in [
-                PRIORITY_BADGE.get(focus['priority'], ''), TASK_BADGE.get(focus['상태'], ''),
-                ':red-badge[:material/schedule: 예정 시각 지남]' if focus['구분'] == '지연' else '',
-                (':red-badge[:material/emergency: 즉시 조치]' if info is not None and info['제약'].startswith('즉시') else ''),
-                (RISK_BADGE.get(risk_word(info['완료 전 고장 확률'], cfg.safety_max), '') if info is not None else ''),
-                (f':orange-badge[:material/inventory_2: {", ".join(PART_NAMES[q] for q in miss_)} 재고 없음 · 긴급 조달 '
-                 f'{cfg.parts.rush_h:.0f}시간]' if miss_ else ':green-badge[:material/inventory_2: 부품 준비됨]')] if x))
-            st.markdown(f'**예정 {clock(focus["due_h"])} → {clock(focus["due_h"] + costs.replace_h)}** · {focus["reason"]}')
-            with st.expander('점검 가이드', icon=':material/fact_check:', expanded=focus['상태'] == '진행 중'):
-                st.markdown(focus['guide'].replace('\n', '  \n'))
-                st.caption('현장 안전 규정과 작업 허가가 우선입니다.')
-            if focus['상태'] == '대기':
-                st.button('작업 시작', icon=':material/play_arrow:', type='primary', on_click=start_task,
-                          args=(int(focus['id']), sid))
+            with st.container(border=True):
+                st.markdown(f'### {r["title"] if str(r["title"]).startswith(sid) else sid + " — " + r["title"]}')
+                st.markdown(f':blue-badge[:material/precision_manufacturing: {nm(sid)}]'
+                            + (f' :gray-badge[:material/group: {people(r)}]' if r['members'] else ''))
+                st.markdown(' '.join(x for x in [
+                    PRIORITY_BADGE.get(r['priority'], ''), TASK_BADGE.get(r['상태'], ''),
+                    ':red-badge[:material/schedule: 예정 시각 지남]' if r['구분'] == '지연' else '',
+                    ':red-badge[:material/emergency: 즉시 조치]' if urgent_job else '',
+                    (RISK_BADGE.get(risk_word(info['완료 전 고장 확률'], cfg.safety_max), '') if info is not None else ''),
+                    (f':orange-badge[:material/inventory_2: {", ".join(PART_NAMES[q] for q in miss_)} 재고 없음 · 긴급 조달 '
+                     f'{cfg.parts.rush_h:.0f}시간]' if miss_ else ':green-badge[:material/inventory_2: 부품 준비됨]')] if x))
+                st.markdown(f'**예정 {clock(r["due_h"])} → {clock(r["due_h"] + costs.replace_h)}** · {r["reason"]}')
+                st.caption(f'시나리오 {sid} · 배정 {clock(r["created_h"])}'
+                           + (f' · 시작 {clock(r["started_h"])}' if pd.notna(r['started_h']) else ''))
+                with st.expander('점검 가이드 (설비관리자 메모)', icon=':material/fact_check:'):
+                    st.markdown(r['guide'].replace('\n', '  \n'))
+            if r['상태'] == '완료':
+                st.success(f'완료 보고 {clock(r["completed_h"])}: **{r["outcome"]}** · 실제 조치 {r["action"] or tasks.ACTIONS[0]} · '
+                           f'확인된 원인 {PART_NAMES.get(r["confirmed"], r["confirmed"])}  \n{r["details"]}'
+                           + (f'  \n지시와 다름 · {r["action_why"]}' if r['action_why'] else ''), icon=':material/task_alt:')
+            elif r['상태'] == '중단':
+                st.warning(f'작업 중단 {clock(r["stopped_h"])} · 사유: {r["stop_why"]}', icon=':material/stop_circle:')
+            elif r['구분'] == '예정':
+                st.info(f'예정 시각({clock(r["due_h"])}) 전이라 보기만 합니다. 그 시각이 되면 "지금"에서 사전 절차를 체크할 수 있습니다.',
+                        icon=':material/event:')
+
+            # 체크리스트: 저장된 값으로 칸을 채운다 (처음 열 때만. 그 뒤로는 체크할 때마다 저장)
+            pre = f'ck{tid}_'
+            for k in PRE_KEYS + POST_KEYS:
+                st.session_state.setdefault(pre + k, bool(saved.get(k)))
+            for k in SAFETY_KEYS:
+                st.session_state.setdefault(pre + k, saved.get(k) if saved.get(k) in SAFETY_OPTS else None)
+            v = lambda k: st.session_state[pre + k]
+            can_pre = r['상태'] == '대기' and r['구분'] in ('지금', '지연')
+            running = r['상태'] == '진행 중'
+            cb = dict(on_change=save_checks, args=(tid, extra))
+
+            pre_left = sum(not v(k) for k in PRE_KEYS)
+            with st.container(border=True):
+                st.markdown('##### :material/assignment_turned_in: 사전 절차' + (' · 완료' if not pre_left else f' · {pre_left}개 남음'))
+                st.checkbox('① 관리자 구두 승인 확인 (작업 허가서는 사후 처리)' if urgent_job else
+                            '① 작업 허가서 출력·확인 (전날 정비 범위 미팅에서 전산 입력한 것)', key=pre + 'permit', disabled=not can_pre, **cb)
+                st.checkbox('② 설비 정지 확인', key=pre + 'halt', disabled=not can_pre or not v('permit'), **cb)
+                with st.container(border=True):
+                    st.markdown('③ **TBM** (Tool Box Meeting) · 작업자 전원, 아래 6개는 순서 상관없음')
+                    for k, label in TBM_ITEMS:
+                        st.checkbox(label, key=pre + k, disabled=not can_pre or not v('halt'), **cb)
+                    st.checkbox('**TBM 완료**', key=pre + 'tbm_done', disabled=not can_pre or not all(v(k) for k, _ in TBM_ITEMS), **cb)
+                st.checkbox('④ 교체 부품·공구 준비', key=pre + 'parts', disabled=not can_pre, **cb)
+                if r['상태'] == '대기':
+                    st.button('작업 시작', icon=':material/play_arrow:', type='primary', key=f'wstart_{tid}', disabled=not can_pre or pre_left > 0,
+                              on_click=start_task, args=(tid, sid),
+                              help='사전 절차를 모두 체크해야 켜집니다' if pre_left else None)
+                    if can_pre and pre_left:
+                        st.caption(f'사전 절차 {pre_left}개 남음 · ①→②→③ 순서대로 켜집니다')
+
+            safety_left = sum(v(k) not in SAFETY_OPTS for k in SAFETY_KEYS)
+            with st.container(border=True):
+                st.markdown('##### :material/health_and_safety: 정비 중 · 10대 안전철칙'
+                            + (' · 완료' if not safety_left else f' · {safety_left}개 남음'))
+                st.caption(f'작업책임자({r["leader"] or tasks.pick_leader(r["members"], "") or "미지정"})가 항목마다 준수 / 해당 없음을 고릅니다.'
+                           + ('' if running or r['상태'] in ('완료', '중단') else ' 작업 시작 뒤에 열립니다.'))
+                for i, (k, (kind, text)) in enumerate(zip(SAFETY_KEYS, SAFETY_RULES), 1):
+                    if i == 1 or kind != SAFETY_RULES[i - 2][0]:
+                        st.markdown(f'**{kind} 수칙**')
+                    st.segmented_control(f'{i}. {text}', SAFETY_OPTS, key=pre + k, disabled=not running, **cb)
+
+            post_ok = running and not safety_left
+            with st.container(border=True):
+                post_left = sum(not v(k) for k in POST_KEYS)
+                st.markdown('##### :material/cleaning_services: 정비 후 절차' + (' · 완료' if not post_left else f' · {post_left}개 남음'))
+                if running and safety_left:
+                    st.caption('정비 중 10대 안전철칙을 모두 고르면 열립니다. ①~④는 순서대로 켜집니다.')
+                for j, (k, label) in enumerate(POST_ITEMS):
+                    first = j == 0 or j >= len(POST_ORDER)
+                    st.checkbox(label, key=pre + k, disabled=not post_ok or not (first or v(POST_ORDER[j - 1])), **cb)
+
+            if r['상태'] in ('대기', '진행 중'):
+                with st.container(horizontal=True):
+                    if running:
+                        ready = not safety_left and not post_left
+                        st.button('완료 보고 작성', icon=':material/edit_note:', type='primary', key=f'wreport_{tid}', disabled=not ready,
+                                  on_click=w_go, args=('report',), help=None if ready else '정비 중 · 정비 후 항목을 모두 체크해야 켜집니다')
+                    st.button('작업 중단', icon=':material/stop_circle:', key=f'wstop_{tid}', on_click=w_go, args=('stop',),
+                              help='현장 상황이 지시와 달라 끝낼 수 없을 때 (언제든)')
+            st.caption('현장 안전 규정과 작업 허가가 우선입니다. 체크는 바로 저장되어 설비관리자가 진행률을 봅니다. ' + STORE_NOTE)
+
+        elif wv == 'report':
+            if r['상태'] != '진행 중':
+                st.info('진행 중인 작업만 완료 보고를 쓸 수 있습니다.', icon=':material/info:')
             else:
-                st.markdown('**완료 보고** · 결과와 수행 내용을 남겨야 완료됩니다. 현장 상황이 지시와 달라 끝내지 못했으면 **작업 중단**')
-                with st.form(f'complete_{int(focus["id"])}', border=False):
+                st.markdown(f'#### {nm(sid)} · 완료 보고')
+                st.caption(f'작업 #{tid} · {r["title"]} · 결과와 수행 내용을 남겨야 완료됩니다.')
+                with st.form(f'complete_{tid}'):
                     c1, c2, c3 = st.columns([1.2, 1, 1])
                     outcome = c1.segmented_control('작업 결과', tasks.OUTCOMES, default='이상 발견', required=True)
                     judged = c2.segmented_control('점검으로 판단한 부품', tasks.JUDGED, default='구분 못함', required=True,
@@ -1331,69 +1603,55 @@ if role == WORKER:
                     details = st.text_area('수행 내용 (필수)', max_chars=tasks.LIMITS['details'],
                                            placeholder='예: 진동장치 베어링 마모 확인, 두 부품 교체 후 신호 정상')
                     # 완료 시각: 작업 시작 ~ 지금 사이에서 고른다 (기본 지금). 재고·점검 집계가 이 시각을 쓴다
-                    lo_ = min(int(np.ceil(focus['started_h'] if pd.notna(focus['started_h']) else focus['created_h'])), int(now))
-                    done_h = hour_pick('완료 시각', lo_, now, now, f'done_at_{int(focus["id"])}')
-                    stop_why = st.text_input('중단 사유 (작업 중단을 누를 때 필수)', max_chars=tasks.LIMITS['why'],
-                                             placeholder='예: 부품이 맞지 않아 교체 못 함, 안전 문제로 작업 허가 보류')
-                    with st.container(horizontal=True):
-                        go_done = st.form_submit_button('완료 보고', icon=':material/task_alt:', type='primary')
-                        go_stop = st.form_submit_button('작업 중단', icon=':material/stop_circle:')
-                    if go_done and pick_ok(done_h, lo_, now):
+                    lo_ = min(int(np.ceil(r['started_h'] if pd.notna(r['started_h']) else r['created_h'])), int(now))
+                    done_h = hour_pick('완료 시각', lo_, now, now, f'done_at_{tid}')
+                    permit_after = st.checkbox('작업 허가서 사후 처리 완료 (즉시 조치는 필수)') if urgent_job else True
+                    go_done = st.form_submit_button('완료 보고 제출', icon=':material/task_alt:', type='primary')
+                if go_done:
+                    if not permit_after:
+                        st.error('즉시 조치 작업은 작업 허가서를 사후 처리한 뒤 완료 보고를 제출하세요.', icon=':material/error:')
+                    elif pick_ok(done_h, lo_, now):
                         try:
-                            done = TASKS.complete(int(focus['id']), done_h, outcome, details, judged, confirmed, action, action_why)
+                            done = TASKS.complete(tid, done_h, outcome, details, judged, confirmed, action, action_why)
                         except ValueError as e:
                             st.error(str(e))
                         else:
                             if done:
+                                if urgent_job:
+                                    TASKS.set_checks(tid, json.dumps({**saved, 'permit_after': True}, ensure_ascii=False))
                                 LOG.record('작업 완료', split, sid, done_h, WORKER, option=action,
-                                           note=details + (f' · 지시와 다름: {action_why}' if action != tasks.ACTIONS[0] else ''))
+                                           note=details + (f' · 지시와 다름: {action_why}' if action != tasks.ACTIONS[0] else '')
+                                           + (' · 작업 허가서 사후 처리 완료' if urgent_job else ''))
                                 LOG.record('점검 결과', split, sid, done_h, WORKER, judged=judged, confirmed=confirmed, note=outcome)
-                                st.session_state.pop('focus_tid', None)
+                                w_go()
                                 st.toast(f'{nm(sid)}: 완료 보고', icon=':material/task_alt:')
                                 st.rerun()
                             else:
                                 st.warning('이미 완료된 작업입니다.')
-                    if go_stop:
-                        try:
-                            stopped = TASKS.stop(int(focus['id']), now, stop_why)
-                        except ValueError as e:
-                            st.error(str(e))
-                        else:
-                            if stopped:
-                                LOG.record('작업 중단', split, sid, now, WORKER, note=f'#{int(focus["id"])} 사유: {stop_why.strip()}')
-                                st.session_state.pop('focus_tid', None)
-                                st.toast(f'{nm(sid)}: 작업 중단 · 설비관리자에게 알렸습니다', icon=':material/stop_circle:')
-                                st.rerun()
-                            else:
-                                st.warning('이미 완료됐거나 중단한 작업입니다.')
-        elif urgent_un:
-            sid = urgent_un[0]
-            st.caption('지금 할 일 · 배정 전 즉시 조치')
-            st.markdown(f'### {nm(sid)} — 즉시 조치: 두 부품 교체')
-            st.caption(f'시나리오 {sid}')
-            st.markdown(':red-badge[:material/emergency: 지금 교체해도 완료 전 고장 확률이 안전 기준 초과] :gray-badge[아직 배정 전]')
-            st.markdown('안전이 먼저입니다. 설비관리자의 배정을 기다리지 않고 바로 시작할 수 있습니다.')
-            st.button(f'{team}이 바로 시작', icon=':material/play_arrow:', type='primary', on_click=urgent_start,
-                      args=(sid, team, dec_i.loc[sid, '추천']))
-        else:
-            st.markdown('##### :material/check_circle: 지금 할 작업이 없습니다')
-            st.caption('설비관리자가 배정하면 여기에 나타납니다.')
-    if focus is not None and urgent_un:
-        st.markdown(f':red-badge[:material/emergency: 배정 전 즉시 조치 {len(urgent_un)}대] {", ".join(urgent_un)} — '
-                    '설비관리자에게 알리세요')
 
-    cnt = mine['구분'].value_counts()
-    t1, t2, t3, t4 = st.tabs([f'지금 {cnt.get("지금", 0)}', f'지연 {cnt.get("지연", 0)}', f'예정 {cnt.get("예정", 0)}',
-                              f'완료·중단 {cnt.get("완료", 0) + cnt.get("중단", 0)}'])
-    for tab, key in [(t1, ['지금']), (t2, ['지연']), (t3, ['예정']), (t4, ['완료', '중단'])]:
-        with tab:
-            rows = mine[mine['구분'].isin(key)]
-            if rows.empty:
-                st.caption('없습니다.')
-            for _, r in rows.iterrows():
-                task_line(r)
-    st.caption('재생 시각 기준: 지금 = 예정 시각이 됐거나 이미 시작함 · 지연 = 예정 시각이 지났는데 시작 전 · 예정 = 아직 · '
-               + STORE_NOTE)
+        else:   # 작업 중단 화면
+            if r['상태'] not in ('대기', '진행 중'):
+                st.info('이미 완료됐거나 중단한 작업입니다.', icon=':material/info:')
+            else:
+                st.markdown(f'#### {nm(sid)} · 작업 중단')
+                st.caption(f'작업 #{tid} · {r["title"]} · 중단하면 설비관리자에게 알리고, 그 설비는 다시 배정할 수 있게 됩니다.')
+                with st.form(f'stop_{tid}'):
+                    stop_why = st.text_area('중단 사유 (필수)', max_chars=tasks.LIMITS['why'],
+                                            placeholder='예: 부품이 맞지 않아 교체 못 함, 안전 문제로 작업 허가 보류')
+                    go_stop = st.form_submit_button('작업 중단 제출', icon=':material/stop_circle:', type='primary')
+                if go_stop:
+                    try:
+                        stopped = TASKS.stop(tid, now, stop_why)
+                    except ValueError as e:
+                        st.error(str(e))
+                    else:
+                        if stopped:
+                            LOG.record('작업 중단', split, sid, now, WORKER, note=f'#{tid} 사유: {stop_why.strip()}')
+                            w_go()
+                            st.toast(f'{nm(sid)}: 작업 중단 · 설비관리자에게 알렸습니다', icon=':material/stop_circle:')
+                            st.rerun()
+                        else:
+                            st.warning('이미 완료됐거나 중단한 작업입니다.')
 
 
 # 1. 설비관리자: 홈(설비 상태 / 작업 지시 현황) → 목록 → 설비의 근거·비용·배정 → 하위 페이지
@@ -1405,10 +1663,7 @@ else:
     # 하위 페이지 (노션처럼): 설비 상세·정책·비용·부품 손익·모델 정보는 목록에서 눌러야 들어가고, 위의 경로로 돌아온다
     sub = st.session_state.get('msub')
     if st.session_state.pop('scroll_top', False):    # 페이지를 바꾸면 맨 위(경로)부터 보이게
-        st.iframe('<script>const d = window.parent.document;'
-                  '["[data-testid=stMain]", "[data-testid=stAppViewContainer]", "section.main"]'
-                  '.forEach(q => { const e = d.querySelector(q); if (e) e.scrollTo(0, 0); });'
-                  'window.parent.scrollTo(0, 0);</script>', height=1)   # 고정된 글(사용자 입력 없음)만 넣는다
+        scroll_to_top()
     if sub in MANAGER_TABS:
         with st.container(horizontal=True, vertical_alignment='center', gap='small'):
             st.button('정비 의사결정', icon=':material/arrow_back:', type='tertiary', key='sub_back', on_click=close_sub)
@@ -1450,19 +1705,7 @@ else:
             st.button(f'{label} :material/chevron_right:\n\n**{value}**', key=f'card_{key}', width='stretch',
                       on_click=on_click, args=args, help=help_)
 
-        # 지표 칸 모양 (st.metric 칸과 비슷하게: 왼쪽 위 이름, 아래 큰 숫자). 고정된 글만 넣는다
-        st.html('<style>'
-                '[class*="st-key-card_"] button { min-height: 132px; justify-content: flex-start; align-items: flex-start; padding: 16px 20px; }'
-                '[class*="st-key-card_"] button > div, [class*="st-key-card_"] button [data-testid="stMarkdownContainer"] '
-                '{ width: 100%; justify-content: flex-start; text-align: left; }'
-                '[class*="st-key-card_"] button p { line-height: 1.25; }'
-                '[class*="st-key-card_"] button strong { font-size: 2.25rem; font-weight: 500; display: block; margin-top: 10px; }'
-                # 조치 안내 칸: 알림 상자처럼 연한 바탕 (라이트·다크 모두 보이게 반투명). 고정된 글만 넣는다
-                '.st-key-guide_red { background: rgba(255,102,122,0.10); border-color: rgba(255,102,122,0.45) !important; }'
-                '.st-key-guide_orange { background: rgba(247,185,85,0.12); border-color: rgba(247,185,85,0.5) !important; }'
-                '.st-key-guide_green { background: rgba(45,212,160,0.10); border-color: rgba(45,212,160,0.45) !important; }'
-                '[class*="st-key-guide_"] [data-testid="stMetricValue"] { font-variant-numeric: tabular-nums; }'
-                '</style>')
+        st.html(CARD_CSS)
 
         def decision_panel(sid):
             """설비 하나의 정비 판단 (2026-10-21 6차 피드백)
@@ -1620,6 +1863,12 @@ else:
                                 st.multiselect('작업자', avail, key=mk, placeholder='작업자를 고르세요',
                                                format_func=lambda m: m + (' (반장)' if m in tasks.LEADERS.values() else '')
                                                + (' (작업 중)' if m in busy_people else ''))
+                                # 작업책임자 (2026-10-21 7차): 고른 작업자 중 한 명, 정비 중 10대 안전철칙을 확인한다. 기본 = 고른 사람 중 반장, 없으면 첫 사람
+                                lk = f'lead_{kind}_{sid}_{team_}'
+                                if sel:
+                                    if st.session_state.get(lk) not in sel:
+                                        st.session_state[lk] = tasks.pick_leader(','.join(sel), '')
+                                    st.selectbox('작업책임자', sel, key=lk, help='정비 중 10대 안전철칙을 확인·체크하는 사람 (고른 작업자 중)')
                                 off = [f'{m}({absent_now[m]})' for m in tasks.TEAMS[team_] if m in absent_now]
                                 if off:
                                     st.caption('부재: ' + ', '.join(off))
@@ -1632,7 +1881,7 @@ else:
                                 prio_ = {'now': '긴급' if urgent else '높음', 'plan': '높음', 'run': '보통'}[kind]
                                 st.button('작업자 화면으로 배정', icon=':material/send:', key=f'assign_{kind}_{sid}', width='stretch',
                                           type='primary' if kind == rec_kind else 'secondary', disabled=not sel, on_click=assign_from_card,
-                                          args=(sid, tk, mk, title_, prio_, now + (v['start'] or 0.0),
+                                          args=(sid, tk, mk, lk, title_, prio_, now + (v['start'] or 0.0),
                                                 f'{sid} · {srow["상태"]} · {label} 선택 · 기대 비용 {manwon(v["cost"])}', label))
                     if existing:
                         when = '' if existing['created_h'] <= now else f' ({clock(existing["created_h"])}에 만든 작업)'
@@ -1821,9 +2070,13 @@ else:
                     why_ = np.where(shown['상태'] == '중단', '중단: ' + shown['stop_why'],
                                     np.where(shown['action_why'] != '', '지시와 다름: ' + shown['action_why'], ''))
                     st.dataframe(shown.assign(confirmed=shown['confirmed'].map(lambda x: PART_NAMES.get(x, x)), due_h=shown['due_h'].map(clock),
-                                              name=shown['sid'].map(nm), act=act_, why=why_)[
-                        ['id', 'name', 'title', 'team', 'members', 'priority', '상태', '구분', 'due_h', 'act', 'outcome', 'confirmed', 'why']].rename(columns={
-                        'id': '번호', 'name': '설비', 'title': '작업', 'team': '팀', 'members': '작업자', 'priority': '우선순위', 'due_h': '예정', 'act': '실제 조치',
+                                              name=shown['sid'].map(nm), act=act_, why=why_,
+                                              # 작업자 체크리스트 진행률 (2026-10-21 7차): 사전 · 정비 중(10대 안전철칙) · 정비 후
+                                              chk=shown['checks'].map(lambda x: f'{check_count(load_checks(x))}/{CHECK_TOTAL}'),
+                                              lead=[x or tasks.pick_leader(m, '') for x, m in zip(shown['leader'], shown['members'])])[
+                        ['id', 'name', 'title', 'team', 'members', 'lead', 'priority', '상태', '구분', 'chk', 'due_h', 'act', 'outcome', 'confirmed', 'why']].rename(columns={
+                        'id': '번호', 'name': '설비', 'title': '작업', 'team': '팀', 'members': '작업자', 'lead': '작업책임자', 'chk': '체크',
+                        'priority': '우선순위', 'due_h': '예정', 'act': '실제 조치',
                         'outcome': '완료 결과', 'confirmed': '확인된 원인', 'why': '사유'}), hide_index=True,
                         column_config={'사유': st.column_config.TextColumn(width='large')})
                     with st.container(horizontal=True):

@@ -875,11 +875,21 @@ def assign_box(sid, srow, sstage, job_, dec_i, W, cfg, load, border=True):
                 st.button('보류', icon=':material/pause_circle:', key='hold_btn', on_click=act,
                           args=('보류', sid, MANAGER), kwargs={'option': rec}, help='지금은 배정하지 않고 지켜봅니다. 배정할 경보 수에서 빠집니다.')
             for part in PARTS:
-                empty = W['stock'][sid][part] < 1
-                st.button(f'{PART_NAMES[part]} ' + ('조달 중' if part in coming_ else
-                                                    f'긴급 발주 ({cfg.parts.rush_h:.0f}시간)' if empty else f'보충 발주 ({cfg.parts.lead_h:.0f}시간)'),
+                st.button(f'{PART_NAMES[part]} ' + ('조달 중' if part in coming_ else f'보충 발주 ({cfg.parts.lead_h:.0f}시간)'),
                           icon=':material/local_shipping:', key=f'order_{part}', disabled=part in coming_, on_click=act,
-                          args=('부품 발주', sid, MANAGER), kwargs={'part': part, 'option': '긴급' if empty else '정상'})
+                          args=('부품 발주', sid, MANAGER), kwargs={'part': part, 'option': '정상'})
+            # 두 부품 긴급 조달 (2026-10-21): 센서로 원인 부품을 가릴 수 없어 교체는 늘 두 부품이라 한 번에. 조달 중인 부품은 건너뛴다
+            rush_parts = [q for q in PARTS if q not in coming_]
+            st.button('두 부품 긴급 조달' + (f' ({cfg.parts.rush_h:.0f}시간)' if rush_parts else ' · 조달 중'), icon=':material/bolt:',
+                      key='order_rush', disabled=not rush_parts, on_click=order_rush, args=(sid, rush_parts),
+                      help=f'{cfg.parts.rush_h:.0f}시간 안에 도착, 웃돈 부품값의 {cfg.parts.rush_markup:.0%}')
+
+
+def order_rush(sid, parts):
+    """두 부품 긴급 조달 (콜백): 조달 중이 아닌 부품을 긴급으로 발주 기록"""
+    for q in parts:
+        LOG.record('부품 발주', split, sid, now, MANAGER, part=q, option='긴급')
+    st.toast(f'{nm(sid)}: ' + ', '.join(PART_NAMES[q] for q in parts) + ' 긴급 조달', icon=':material/bolt:')
 
 
 def cancel_task(tid, sid, title, why_key):
@@ -1251,8 +1261,8 @@ else:
 
         def decision_panel(sid):
             """설비 하나의 정비 판단 (2026-10-21 3차 피드백)
-            큰 상자: 예측정비 · 다음 정기 교체 · 사후정비 비용(만 원) → 배정·보류·부품 발주
-            그 아래: 설명 → 조치 안내 → 근거 사슬(온톨로지) → 접힌 칸(비용 가정 · 비용 계산 근거)"""
+            조치 안내 → 큰 상자: 예측정비 · 다음 정기 교체 · 사후정비 비용(만 원) → 배정·보류·부품 발주(보충·두 부품 긴급)
+            그 아래: 설명 → 접힌 칸(근거 사슬(온톨로지) · 비용 가정 · 비용 계산 근거)"""
             srow = t.loc[sid]
             sstage = srow['상태'].split(' (')[0]
             with st.container(horizontal=True, vertical_alignment='center'):
@@ -1275,6 +1285,11 @@ else:
                 st.markdown(f':green-badge[:material/task_alt: {JOB_NOTE[job_]}]' if job_ == '작업 완료'
                             else f':orange-badge[:material/stop_circle: {JOB_NOTE[job_]}]' if job_ == '작업 중단'
                             else f':blue-badge[:material/info: {JOB_NOTE[job_]}]')
+            # 조치 안내: 비용보다 먼저 (2026-10-21 4차 피드백)
+            action_guide(srow)
+            if sstage == '주의':
+                pr = procurement(cfg, W['stock'], [sid]).iloc[0]
+                st.caption(f'부품: {pr["발주"]} (재고 {pr["재고"]})')
             alarm = sid in dec_i.index
             if alarm:
                 r_ = dec_i.loc[sid]
@@ -1326,20 +1341,15 @@ else:
                         st.caption('고장 난 뒤 복구')
                 st.divider()
                 assign_box(sid, srow, sstage, job_, dec_i, W, cfg, load, border=False)
-            # 상자 아래: 설명 → 조치 안내 → 근거 → 접힌 칸
+            # 상자 아래: 설명 → 근거(접힘) → 접힌 칸
             if alarm:
                 st.markdown(f'- 고장 나면 드는 돈(정지·생산 차질·복구): **{manwon(costs.failure_loss)}**\n'
                             f'- 추천 조치({b["선택지"]})의 기대 비용: **{manwon(b["기대 총비용"])}** · 끝나기 전에 고장 날 확률: '
                             f'**{b["고장 확률"]:.0%}** (안전 기준 {cfg.safety_max:.0%})'
                             + (f'\n- 고장 난 뒤 고치는 것보다 **{manwon(costs.failure_loss - b["기대 총비용"])}** 적게 듭니다'
                                if costs.failure_loss > b['기대 총비용'] else ''))
-            action_guide(srow)
-            if sstage == '주의':
-                pr = procurement(cfg, W['stock'], [sid]).iloc[0]
-                st.caption(f'부품: {pr["발주"]} (재고 {pr["재고"]})')
-            # 근거 사슬 (온톨로지). 만들다 실패해도 이 칸만 알리고 나머지 화면은 그대로 둔다 (2026-10-21 배포 오류 재발 방지)
-            with st.container(border=True):
-                st.markdown('##### :material/account_tree: 근거: 경보 → 예측 → 신호 → 정비 결정')
+            # 근거 사슬 (온톨로지, 눌러야 펼쳐짐). 만들다 실패해도 이 칸만 알리고 나머지 화면은 그대로 둔다 (2026-10-21 배포 오류 재발 방지)
+            with st.expander('근거: 경보 → 예측 → 신호 → 정비 결정 (온톨로지)', icon=':material/account_tree:'):
                 try:
                     tr = ontology.trace(ontology_graph(A, t), sid, with_cost=alarm)
                 except Exception as err:

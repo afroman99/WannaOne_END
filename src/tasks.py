@@ -34,7 +34,12 @@ from pathlib import Path
 
 import pandas as pd
 
-TEAMS = {'정비 1팀': ['김 반장', '이 기사', '박 기사', '최 기사'], '정비 2팀': ['정 반장', '강 기사', '조 기사', '윤 기사']}
+# 가상 정비팀 (2026-10-21): 팀당 5명, 첫 사람이 반장. 이름은 시연용 가상 이름
+TEAMS = {'정비 1팀': ['김도현', '이서준', '박지훈', '최민재', '한우진'], '정비 2팀': ['강태윤', '조성민', '윤재혁', '장현우', '임동건']}
+LEADERS = {k: v[0] for k, v in TEAMS.items()}
+TEAM_OF = {n: k for k, v in TEAMS.items() for n in v}
+# 인원 부재 (2026-10-21): 설비관리자가 '인원 현황'에서 사람마다 종류·기간을 고른다. 기간은 재생 시각(h, 0 = 1일차 00:00)
+ABSENCE_KINDS = ['연차', '반차(오전)', '반차(오후)', '병가', '출산휴가', '육아휴직', '교육', '예비군', '출장']
 PRIORITIES = ['긴급', '높음', '보통']
 OUTCOMES = ['이상 없음', '이상 발견', '추가 점검 필요']
 STATUSES = ['대기', '진행 중', '완료']      # 설비관리자가 고를 수 있는 상태 (중단은 작업자가 '작업 중단'으로만)
@@ -47,11 +52,11 @@ CONFIRMED = ['valve', 'oscillator', '아직 모름']
 LIMITS = {'title': 80, 'guide': 600, 'reason': 600, 'details': 500, 'option': 60, 'why': 200}
 COLUMNS = ['id', 'split', 'sid', 'title', 'team', 'priority', 'due_h', 'created_h', 'started_h', 'completed_h', 'guide',
            'reason', 'option', 'outcome', 'details', 'judged', 'confirmed', 'created_at', 'updated_at', 'completed_at',
-           'stopped_h', 'stop_why', 'action', 'action_why']
+           'stopped_h', 'stop_why', 'action', 'action_why', 'members']
 # 2026-10-21에 덧붙인 칸 (기존 표에 없으면 ALTER TABLE로 추가한다. 지우거나 바꾸지 않는다)
 #   stopped_h 작업 중단 시각 · stop_why 중단 사유 · action 실제 조치 · action_why 지시와 다르게 한 이유
 NEW_COLUMNS = {'stopped_h': 'REAL', 'stop_why': "TEXT NOT NULL DEFAULT ''", 'action': "TEXT NOT NULL DEFAULT ''",
-               'action_why': "TEXT NOT NULL DEFAULT ''"}
+               'action_why': "TEXT NOT NULL DEFAULT ''", 'members': "TEXT NOT NULL DEFAULT ''"}   # members: 배정한 작업자 (쉼표로)
 _SID = re.compile(r'^S\d{4}$')
 _CTRL = re.compile(r'[\x00-\x08\x0b-\x1f\x7f]')     # 줄바꿈(\n, \x0a)은 남긴다
 
@@ -62,7 +67,11 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS tasks(
     outcome TEXT NOT NULL DEFAULT '', details TEXT NOT NULL DEFAULT '', judged TEXT NOT NULL DEFAULT '',
     confirmed TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
     completed_at TEXT NOT NULL DEFAULT '', stopped_h REAL, stop_why TEXT NOT NULL DEFAULT '',
-    action TEXT NOT NULL DEFAULT '', action_why TEXT NOT NULL DEFAULT '')"""
+    action TEXT NOT NULL DEFAULT '', action_why TEXT NOT NULL DEFAULT '', members TEXT NOT NULL DEFAULT '')"""
+ABSENCE_SCHEMA = """CREATE TABLE IF NOT EXISTS absences(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, team TEXT NOT NULL, kind TEXT NOT NULL,
+    start_h REAL NOT NULL, end_h REAL NOT NULL, note TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL)"""
+ABSENCE_COLUMNS = ['id', 'name', 'team', 'kind', 'start_h', 'end_h', 'note', 'updated_at']
 SETTINGS_SCHEMA = 'CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)'
 
 DEFAULT_GUIDE = ('① 안전 절차·작업 허가 확인\n'
@@ -85,6 +94,15 @@ def _hour(x):
     if not (0 <= h <= 240) or math.isnan(h):
         raise ValueError(f'시각 범위 밖: {x}')
     return h
+
+
+def _members(team, members):
+    """작업자 목록 → 저장 문자열 ('김도현,이서준'). 그 팀 사람만"""
+    names = [str(m).strip() for m in (members or []) if str(m).strip()]
+    bad = [m for m in names if m not in TEAMS.get(team, [])]
+    if bad:
+        raise ValueError(f'{team} 팀원이 아님: {", ".join(bad)}')
+    return ','.join(dict.fromkeys(names))
 
 
 def _missing(x):
@@ -116,7 +134,8 @@ class TaskStore:
         self.rows = []
         self.settings = {}
         self._cache = None               # 공용 DB: 한 번 그리는 동안 읽은 표 (쓰면 지운다)
-        self.T, self.S = ('castpdm.tasks', 'castpdm.settings') if db else ('tasks', 'settings')
+        self.absence_rows = []           # 세션 저장일 때 부재 기록
+        self.T, self.S, self.A = ('castpdm.tasks', 'castpdm.settings', 'castpdm.absences') if db else ('tasks', 'settings', 'absences')
         if self.path:
             with self._conn():
                 pass                     # 파일과 표를 미리 만든다
@@ -140,6 +159,7 @@ class TaskStore:
             conn.execute('PRAGMA busy_timeout=20000')
             conn.execute(SCHEMA)
             conn.execute(SETTINGS_SCHEMA)
+            conn.execute(ABSENCE_SCHEMA)
             have = {r['name'] for r in conn.execute('PRAGMA table_info(tasks)').fetchall()}
             for col, typ in NEW_COLUMNS.items():       # 예전 파일에 새 칸 덧붙이기
                 if col not in have:
@@ -170,11 +190,58 @@ class TaskStore:
     def version(self):
         """작업 표·함께 보는 값이 바뀌었는지 가볍게 확인 (작은 쿼리 두 개). 자동 갱신이 이 값이 바뀔 때만 화면을 다시 그린다"""
         if not self.shared:
-            return (len(self.rows), max([r['updated_at'] for r in self.rows], default=''), tuple(sorted(self.settings.items())))
+            return (len(self.rows), max([r['updated_at'] for r in self.rows], default=''), tuple(sorted(self.settings.items())),
+                    len(self.absence_rows), max([r['updated_at'] for r in self.absence_rows], default=''))
         with self._conn() as c:
             r = c.execute(f"SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS m, COALESCE(MAX(updated_at), '') AS u FROM {self.T}").fetchone()
             kv = tuple((x['key'], x['value']) for x in c.execute(f'SELECT key, value FROM {self.S} ORDER BY key').fetchall())
-        return (int(r['n']), int(r['m']), r['u'], kv)
+            a = c.execute(f"SELECT COUNT(*) AS n, COALESCE(MAX(updated_at), '') AS u FROM {self.A}").fetchone()
+        return (int(r['n']), int(r['m']), r['u'], kv, int(a['n']), a['u'])
+
+    # 인원 부재 (2026-10-21)
+
+    def absences(self):
+        """부재 기록 전부 (이름·팀·종류·시작h·끝h·메모)"""
+        if self.shared:
+            with self._conn() as c:
+                df = pd.DataFrame([dict(r) for r in c.execute(f'SELECT * FROM {self.A} ORDER BY name, start_h').fetchall()],
+                                  columns=ABSENCE_COLUMNS)
+        else:
+            df = pd.DataFrame(self.absence_rows, columns=ABSENCE_COLUMNS)
+        for k in ('start_h', 'end_h'):
+            df[k] = pd.to_numeric(df[k]).astype(float)
+        return df.reindex(columns=ABSENCE_COLUMNS)
+
+    def save_absences(self, rows):
+        """부재 기록을 통째로 바꾼다 (인원 현황 화면의 '저장'). rows: [{'name','kind','start_h','end_h','note'}].
+        이름은 정비팀 명단에서만, 종류는 정해진 값만, 시작 < 끝. 맞지 않으면 ValueError"""
+        stamp = dt.datetime.now().isoformat(timespec='microseconds')
+        clean_rows = []
+        for r in rows:
+            name, kind = str(r.get('name', '')).strip(), str(r.get('kind', '')).strip()
+            if name not in TEAM_OF or kind not in ABSENCE_KINDS:
+                raise ValueError(f'명단에 없는 이름이거나 정해진 부재 종류가 아님: {name} {kind}')
+            a, b = _hour(r['start_h']), _hour(r['end_h'])
+            if not a < b:
+                raise ValueError(f'{name}: 끝 시각이 시작 시각보다 뒤여야 합니다')
+            clean_rows.append({'name': name, 'team': TEAM_OF[name], 'kind': kind, 'start_h': a, 'end_h': b,
+                               'note': clean(r.get('note', ''), 100), 'updated_at': stamp})
+        if not self.shared:
+            self.absence_rows = [{'id': i + 1, **r} for i, r in enumerate(clean_rows)]
+            return len(clean_rows)
+        keys = ['name', 'team', 'kind', 'start_h', 'end_h', 'note', 'updated_at']
+        with self._conn() as c:
+            c.execute(f'DELETE FROM {self.A}')
+            for r in clean_rows:
+                c.execute(f'INSERT INTO {self.A} ({",".join(keys)}) VALUES ({",".join("?" * len(keys))})', [r[k] for k in keys])
+        self.set_setting('absences_saved', stamp)    # 모두 지웠을 때도 version이 바뀌게 (자동 갱신으로 다른 화면에 반영)
+        return len(clean_rows)
+
+    def absent_at(self, hour):
+        """그 시각에 부재 중인 사람 {이름: 종류}"""
+        df = self.absences()
+        hit = df[(df['start_h'] <= hour) & (df['end_h'] > hour)]
+        return dict(zip(hit['name'], hit['kind']))
 
     # 읽기
 
@@ -194,7 +261,7 @@ class TaskStore:
             df = pd.DataFrame(self.rows, columns=COLUMNS)
         df = df.reindex(columns=COLUMNS).copy()
         df['stopped_h'] = pd.to_numeric(df['stopped_h']).astype(float)
-        for k in ('stop_why', 'action', 'action_why'):
+        for k in ('stop_why', 'action', 'action_why', 'members'):
             df[k] = df[k].fillna('').astype(str)
         return df[df['split'] == split].reset_index(drop=True) if split else df
 
@@ -238,12 +305,13 @@ class TaskStore:
 
     # 쓰기
 
-    def add(self, split, sid, title, team, priority, due_h, created_h, guide, reason, option=''):
-        """작업 배정. 같은 설비에 지금 열린 작업이 있으면 넣지 않고 False"""
+    def add(self, split, sid, title, team, priority, due_h, created_h, guide, reason, option='', members=()):
+        """작업 배정. 같은 설비에 지금 열린 작업이 있으면 넣지 않고 False. members: 배정한 작업자 (그 팀 사람만)"""
         if split not in ('test', 'validation') or not _SID.match(str(sid)):
             raise ValueError('데이터 세트·설비 ID 형식이 아님')
         if team not in TEAMS or priority not in PRIORITIES:
             raise ValueError('팀·우선순위는 정해진 값만')
+        members = _members(team, members)
         title = clean(title, LIMITS['title'])
         if not title:
             raise ValueError('작업명을 입력하세요')
@@ -253,7 +321,7 @@ class TaskStore:
                'guide': clean(guide, LIMITS['guide']), 'reason': clean(reason, LIMITS['reason']),
                'option': clean(option, LIMITS['option']), 'outcome': '', 'details': '', 'judged': '', 'confirmed': '',
                'created_at': stamp, 'updated_at': stamp, 'completed_at': '',
-               'stopped_h': None, 'stop_why': '', 'action': '', 'action_why': ''}
+               'stopped_h': None, 'stop_why': '', 'action': '', 'action_why': '', 'members': members}
         keys = [k for k in COLUMNS if k != 'id']
         insert = f'INSERT INTO {self.T} ({",".join(keys)}) VALUES ({",".join("?" * len(keys))})'
         select = f'SELECT created_h, completed_h, stopped_h FROM {self.T} WHERE split=? AND sid=?'
@@ -385,8 +453,9 @@ class TaskStore:
         return self._update(task_id, {'outcome': outcome, 'details': details, 'judged': judged, 'confirmed': confirmed},
                             where_done=True)
 
-    def edit(self, task_id, team, priority, due_h, guide, reason):
+    def edit(self, task_id, team, priority, due_h, guide, reason, members=None):
         if team not in TEAMS or priority not in PRIORITIES:
             raise ValueError('팀·우선순위는 정해진 값만')
-        return self._update(task_id, {'team': team, 'priority': priority, 'due_h': _hour(due_h),
+        extra = {} if members is None else {'members': _members(team, members)}
+        return self._update(task_id, {**extra, 'team': team, 'priority': priority, 'due_h': _hour(due_h),
                                       'guide': clean(guide, LIMITS['guide']), 'reason': clean(reason, LIMITS['reason'])})

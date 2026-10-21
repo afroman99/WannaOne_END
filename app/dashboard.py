@@ -217,7 +217,7 @@ ROLE_LABEL = {WORKER: '작업자', MANAGER: '설비관리자'}
 MANAGER_TABS = {'설비 상세': '설비 상세', '정책·비용': '의사결정', '부품 손익': '비용 계산기', '모델 정보·한계': '모델 정보'}
 # 설비관리자 홈 범주와 화면 단계 (2026-10-21): 설비 상태 → (경보 칸) → 경보 설비 목록 → 설비 화면
 #   / 작업 지시 현황 → (배정할 경보 칸) → 배정할 시나리오 목록 → 고르면 그 아래 근거·비용 → 배정·보류
-EQUIP, ORDERS = '설비 상태', '작업 지시 현황'
+EQUIP, ORDERS, STAFF = '설비 상태', '작업 지시 현황', '인원 현황'
 MANAGER_VIEWS = ('경보', '주의', '정상', 'assign')
 ICONS = {WORKER: ':material/engineering:', MANAGER: ':material/manage_accounts:',
          '내 작업': ':material/checklist:', '설비 상세': ':material/monitoring:', '정책·비용': ':material/balance:',
@@ -585,6 +585,29 @@ def make_cfg(A):
     return costs, cfg
 
 
+# 인·시 작업량 (2026-10-21): 지금 비용 가정(4명이 교체 4시간, 고장 복구 8시간)을 작업량으로 본다.
+#   n명이 맡으면 걸리는 시간 = 작업량 ÷ n. 인건비 합계는 인원과 상관없이 같고, 정지 시간·작업 중 고장 확률이 바뀐다
+WORK_REPLACE, WORK_REPAIR = 16.0, 32.0     # 교체 · 고장 복구 (인·시)
+SHIFT = (9, 17)                            # 정규 근무 9시~17시 (하루 8시간, 상주 근무)
+OVERTIME = 1.5                             # 정규 근무 밖(야간·휴일 특근) 인건비 배율 (팀 결정 2026-10-21)
+
+
+def overtime_share(start_h, dur):
+    """start_h부터 dur시간 동안 정규 근무 밖인 비율 (재생 시각의 시 = 하루 안 시각)"""
+    if dur <= 0:
+        return 0.0
+    hours = np.arange(start_h, start_h + dur, 0.25) % 24
+    return float(np.mean((hours < SHIFT[0]) | (hours >= SHIFT[1])))
+
+
+def crew_costs(base, n, start_h, labor_ph):
+    """n명이 맡을 때의 비용 가정: 교체 16인·시 ÷ n시간, 고장 복구 32인·시 ÷ n시간, 정규 근무 밖은 인건비 1.5배"""
+    n = max(1, int(n))
+    rep_h, fix_h = WORK_REPLACE / n, WORK_REPAIR / n
+    mult = 1 + (OVERTIME - 1) * overtime_share(start_h, rep_h)
+    return replace(base, replace_h=rep_h, repair_h=fix_h, labor_h=labor_ph * n * mult)
+
+
 def stock_now(cfg):
     """설비마다 지금 남은 예비 재고 {sid: {'valve': n, 'oscillator': n}}.
     처음 재고 − 고장 복구에 쓴 부품 − 작업 완료(두 부품 교체)에 쓴 부품 + 도착한 발주. 정기 교체 부품은 계획과 함께 들어온다고 본다"""
@@ -647,7 +670,7 @@ def work_plan(A, t):
     """경보 설비마다 추천 선택지와 정비팀 일정 (우선순위, 하루 작업 한도 포함)"""
     costs, cfg = make_cfg(A)
     STOCK = stock_now(cfg)
-    n_crews, crew_day_h = A['n_crews'], A['crew_day_h']
+    crew_day_h = A['crew_day_h']           # 한 사람의 하루 근무 시간 (정비팀 수는 명단(tasks.TEAMS)에서)
     delay_h = A['delay_h']
     delay_rate = A['f_delay_rate'] if A['mode'] == COST_MODES[1] else A['delay_rate']
     curve = bundle['dss']['curve']
@@ -675,13 +698,17 @@ def work_plan(A, t):
     # 우선순위: 지금 정비가 필요한 설비를 위험한 순서로(한 차례 미루면 고장 확률이 큰 순서) 정비팀에 배정한다
     need_crew = sorted([s for s in alarm_ids if not first[s]['best']['선택지'].startswith('다음 정기')],
                        key=lambda s: -fail_prob(curve, first[s]['elapsed'], first[s]['opts'][0]['정비 완료까지(h)'] + costs.replace_h))
-    per_day = max(1, int(crew_day_h // costs.replace_h))     # 팀 하나가 하루에 할 수 있는 교체 수 (8공수 ÷ 4시간 = 2)
+    # 팀 하루 작업 한도 (2026-10-21, 인·시): 출근한 팀원 × 하루 8시간 ÷ 교체 1번 16인·시 = 팀당 하루 교체 수.
+    #   전원 출근이면 5명 × 8 = 40인·시 → 2번 (예전 '팀당 하루 2대'와 같다). 부재가 있으면 줄어든다.
+    #   순서·대기 계산은 작업 하나를 4명 · 4시간으로 본다 (팀 결정 A2: 고른 인원은 그 작업의 비용·시간에만)
+    absent_now = TASKS.absent_at(now)
+    team_jobs = {k: int(sum(m not in absent_now for m in v) * crew_day_h // WORK_REPLACE) for k, v in tasks.TEAMS.items()}
+    per_day = max(1, max(team_jobs.values()))
+    slots = sorted(d * 24.0 + j * costs.replace_h for d in range(30) for n_ in team_jobs.values() for j in range(n_))
 
     def crew_delay(k):
-        """k번째(0부터) 정비 작업이 시작될 때까지 기다리는 시간: 팀 수만큼 동시에, 팀당 하루 per_day번, 넘으면 다음 날"""
-        rnd = k // n_crews                 # 몇 번째 차례인가 (모든 팀이 동시에 한 대씩)
-        day, within = divmod(rnd, per_day)
-        return day * 24.0 + within * costs.replace_h
+        """k번째(0부터) 정비 작업이 시작될 때까지 기다리는 시간: 팀마다 하루 한도만큼, 넘으면 다음 날 (모든 팀이 비면 아주 뒤)"""
+        return slots[k] if k < len(slots) else 24.0 * 30
 
     rows = []
     for k, sid in enumerate(need_crew + [s for s in alarm_ids if s not in need_crew]):
@@ -972,10 +999,10 @@ def urgent_start(sid, team, option):
         st.toast(f'{sid}: 이미 열린 작업이 있습니다', icon=':material/info:')
 
 
-def assign_task(sid, title, team, priority, due_h, guide, reason, option):
+def assign_task(sid, title, team, priority, due_h, guide, reason, option, members=()):
     """작업 배정 = 정비 결정 승인 + 작업 지시 (같은 설비에 열린 작업이 있으면 배정하지 않는다)"""
     try:
-        ok = TASKS.add(split, sid, title, team, priority, due_h, now, guide, reason, option)
+        ok = TASKS.add(split, sid, title, team, priority, due_h, now, guide, reason, option, members)
     except ValueError as e:
         st.toast(str(e), icon=':material/error:')
         return
@@ -1050,12 +1077,14 @@ def order_buttons(sid, sstage, alarm, rec, cfg, W):
                       help=f'{cfg.parts.rush_h:.0f}시간 안에 도착, 웃돈 부품값의 {cfg.parts.rush_markup:.0%}')
 
 
-def assign_from_card(sid, team_key, title, priority, due_h, reason, option):
-    """비용 칸의 '작업자 화면으로 배정' (콜백, 2026-10-21): 그 칸의 선택지로 배정. 점검 가이드·덧붙일 말은 '작업 내용 바꾸기'에서"""
+def assign_from_card(sid, team_key, members_key, title, priority, due_h, reason, option):
+    """비용 칸의 '작업자 화면으로 배정' (콜백, 2026-10-21): 그 칸의 선택지·작업자로 배정. 점검 가이드·덧붙일 말은 '작업 내용 바꾸기'에서"""
     team = st.session_state.get(team_key, list(tasks.TEAMS)[0])
+    members = list(st.session_state.get(members_key, []))
     guide = st.session_state.get(f'guide_txt_{sid}') or tasks.DEFAULT_GUIDE
     note = str(st.session_state.get(f'reason_txt_{sid}', '')).strip()
-    assign_task(sid, title, team, priority, min(240.0, max(0.0, float(due_h))), guide, reason + (f' · {note}' if note else ''), option)
+    assign_task(sid, title, team, priority, min(240.0, max(0.0, float(due_h))), guide, reason + (f' · {note}' if note else ''), option,
+                members)
 
 
 def cancel_task(tid, sid, title, why_key):
@@ -1085,6 +1114,7 @@ def task_line(r):
         st.markdown(f'**#{int(r["id"])} {r["title"] if str(r["title"]).startswith(r["sid"]) else r["sid"] + " — " + r["title"]}**  \n'
                     + ' '.join([PRIORITY_BADGE.get(r['priority'], ''), TASK_BADGE.get(r['상태'], ''),
                                 ':red-badge[지연]' if r['구분'] == '지연' else '', f':gray-badge[{r["team"]}]',
+                                f':gray-badge[:material/group: {r["members"].replace(",", " · ")}]' if r['members'] else '',
                                 f':blue-badge[{nm(r["sid"])}]']))
         st.caption(f'예정 {clock(r["due_h"])} · 배정 {clock(r["created_h"])}'
                    + (f' · 완료 {clock(r["completed_h"])}' if pd.notna(r['completed_h']) and r['상태'] == '완료' else '')
@@ -1166,6 +1196,9 @@ def task_editor(tf):
         with st.form(f'edit_task_{tid}', border=False):
             c1, c2, c3 = st.columns(3)
             e_team = c1.selectbox('담당 팀', list(tasks.TEAMS), index=list(tasks.TEAMS).index(cur['team']))
+            cur_mem = [m for m in str(cur['members']).split(',') if m in tasks.TEAMS[cur['team']]]
+            e_mem = st.multiselect('작업자 (팀을 바꾸면 저장할 때 새 팀원만 남깁니다)', [m for v in tasks.TEAMS.values() for m in v], default=cur_mem,
+                                   format_func=lambda m: f'{m} · {tasks.TEAM_OF[m]}')
             e_prio = c2.selectbox('우선순위', tasks.PRIORITIES, index=tasks.PRIORITIES.index(cur['priority']))
             e_due = c3.selectbox('시작 예정', list(range(241)), index=min(240, int(round(cur['due_h']))), format_func=clock)
             e_guide = st.text_area('점검 가이드', value=cur['guide'], max_chars=tasks.LIMITS['guide'])
@@ -1188,7 +1221,7 @@ def task_editor(tf):
                     st.error('수정 사유를 입력해야 저장됩니다.', icon=':material/error:')
                 elif e_state != '완료' or done_ or pick_ok(e_at, lo_e, now):
                     try:
-                        TASKS.edit(tid, e_team, e_prio, e_due, e_guide, e_reason)
+                        TASKS.edit(tid, e_team, e_prio, e_due, e_guide, e_reason, [m for m in e_mem if tasks.TEAM_OF[m] == e_team])
                         if e_state != cur['상태']:
                             # 상태 변경: 작업 기록을 바꾸고, 진행 단계 기록(src/actions.py)에도 남겨 화면 전체가 같은 상태를 본다
                             if e_state == '완료':
@@ -1266,7 +1299,8 @@ if role == WORKER:
             miss_ = missing_parts(W['stock'][sid], need)
             st.caption(f'지금 할 일 · {team} · 작업 #{int(focus["id"])}')
             st.markdown(f'### {focus["title"] if str(focus["title"]).startswith(sid) else sid + " — " + focus["title"]}')
-            st.markdown(f':blue-badge[:material/precision_manufacturing: {nm(sid)}]')
+            st.markdown(f':blue-badge[:material/precision_manufacturing: {nm(sid)}]'
+                        + (f' :gray-badge[:material/group: 작업자 {focus["members"].replace(",", " · ")}]' if focus['members'] else ''))
             st.markdown(' '.join(x for x in [
                 PRIORITY_BADGE.get(focus['priority'], ''), TASK_BADGE.get(focus['상태'], ''),
                 ':red-badge[:material/schedule: 예정 시각 지남]' if focus['구분'] == '지연' else '',
@@ -1461,32 +1495,6 @@ else:
                 b = e['best']
                 p24 = fail_prob(W['curve'], e['elapsed'], 24)
                 now_opt = next(o for o in e['opts'] if o['선택지'].startswith('지금'))
-                plan_opt = next((o for o in e['opts'] if not o['선택지'].startswith('지금')), None)
-                plan_cost, plan_sub, plan_note, plan_start = None, '', '', None
-                if plan_opt is not None:
-                    plan_cost, plan_sub, plan_start = plan_opt['기대 총비용'], plan_opt['선택지'], e['wait_h']
-                else:
-                    # 엔진 조건(최대 대기·부품·정비팀) 밖이거나 정기 교체 계획이 없으면 비교용으로만 계산한다
-                    #   정비팀 차례 대기는 계획 정비에도 똑같이 건다 (2026-10-16: 대기 없이 비교하면 '나중에 하는 게 더 빨리 끝나는' 비교가 됨)
-                    crew_h = cfg.crew_wait_h + r_['_slot']
-                    loose = replace(cfg, max_wait_h=1e9, prep_h=0.0, crew_wait_h=crew_h)
-                    has_plan = pd.notna(e['wait_h'])
-                    guesses = tuple(d for d in (PLAN_GUESS_H, 2 * PLAN_GUESS_H) if d > crew_h) or (int(np.ceil(crew_h)) + PLAN_GUESS_H,)
-                    for d_ in ((None,) if has_plan else ()) + guesses:
-                        po_ = [o for o in options(e['wait_h'] if d_ is None else np.nan, W['curve'], loose, e['elapsed'], delay_h=d_,
-                                                  stock=W['stock'][sid], plan_part=e['plan_part']) if not o['선택지'].startswith('지금')]
-                        if po_:
-                            plan_cost = po_[0]['기대 총비용']
-                            plan_start = e['wait_h'] if d_ is None else float(d_)
-                            plan_sub = (f'{e["wait_h"]:.0f}시간 뒤 · 조건 밖이라 비교만' if d_ is None else
-                                        ('정기 교체 때 부품을 맞출 수 없음' if has_plan else '정기 교체 계획 없음') + f' · {d_}시간 뒤 정지 가정')
-                            plan_note = (f'다음 정기 교체({e["wait_h"]:.0f}시간 뒤)는 최대 대기·부품·정비팀 조건 밖이라 추천 대상에서 뺐습니다. '
-                                         if d_ is None else
-                                         (f'다음 정기 교체({e["wait_h"]:.0f}시간 뒤)에는 부품을 맞출 수 없어' if has_plan else '정기 교체 계획이 없어')
-                                         + f' 다음 정기 교체 칸은 {d_}시간 뒤 정지를 가정해 비교만 합니다. ')
-                            if po_[0]['고장 확률'] > cfg.safety_max:
-                                plan_note += f'그때까지 고장 확률 {po_[0]["고장 확률"]:.2f}로 안전 기준을 넘습니다. '
-                            break
             # 조치 안내 칸 (알림 상자처럼 꾸민 테두리 칸: 알림 상자 st.error에는 토글을 넣을 수 없어서, 2026-10-21)
             tone, g_title, g_icon, g_body = guide_content(srow)
             remain = remaining_median(W['curve'], e['elapsed']) if alarm else None
@@ -1526,35 +1534,106 @@ else:
                 if g_right is not None:
                     with g_right:
                         st.metric('고장 예상까지', hms(remain) if remain is not None else '—')
-            # 정비 판단 상자: 칸마다 비용과 그 선택지로 배정 (2026-10-21)
+            # 정비 판단 상자 (2026-10-21): 즉시 정비 · 다음 정기 교체 · 사후정비를 같은 기준으로 비교하고 그 칸에서 배정
+            #   같은 기준 = 같은 비교 기간(지금 ~ 다음 정기 정지, 계획이 없으면 시연 끝 72h) 안의 기대 비용,
+            #   같은 비용 항목(부품 · 인건비(인·시, 정규 근무 밖 1.5배) · 정지 생산 차질 · 고장 손실). 칸마다 고른 작업자 수로 다시 계산
+            rec_kind, vals = None, {}
             with st.container(border=True):
                 st.markdown(f'##### {nm(sid)} · 정비 판단')
                 if alarm:
                     existing = TASKS.blocking(split, sid, now)
                     can_assign = existing is None and job_ != '작업 완료'
                     urgent = r_['제약'].startswith('즉시')
-                    team0 = list(tasks.TEAMS).index(min(load, key=load.get))
-                    now_start = now if urgent else now + max(0.0, now_opt['정비 완료까지(h)'] - costs.replace_h)
-                    cards = [('now', '즉시 정비', now_opt['기대 총비용'], now_opt['선택지'], b is now_opt,
-                              '경보를 보고 지금 두 부품을 교체할 때의 기대 총비용',
-                              (f'{sid} 지금 두 부품 교체', '긴급' if urgent else '높음', now_start, '즉시 정비')),
-                             ('plan', '다음 정기 교체', plan_cost, plan_sub or '계산할 수 없음', plan_opt is not None and b is plan_opt,
-                              '정해 둔 정기 교체(계획 정지) 때 두 부품을 함께 교체할 때의 기대 총비용',
-                              (f'{sid} 다음 정기 교체 때 두 부품 교체', '높음', now + (plan_start or 0.0), '다음 정기 교체')),
-                             ('run', '사후정비', costs.failure_loss, '고장 난 뒤 복구', False,
-                              '고장 난 뒤 복구: 계획 밖 정지·생산 차질·복구 비용',
-                              (f'{sid} 사후정비: 운전 계속 · 고장 나면 복구', '보통', now, '사후정비'))]
-                    for col, (kind, label, cost, sub, rec, help_, job) in zip(st.columns(3, border=True), cards):
+                    base_wait = cfg.crew_wait_h + r_['_slot']
+                    now_start = 0.0 if urgent else max(0.0, now_opt['정비 완료까지(h)'] - costs.replace_h)
+                    horizon = float(e['wait_h']) if pd.notna(e['wait_h']) else max(1.0, 72.0 - now)
+                    ph = A['f_labor_ph']
+
+                    def card_values(kind, n):
+                        """칸 하나의 기대 비용 (n명이 맡을 때). 반환: cost, p(기간 안 또는 끝나기 전 고장 확률), sub, start"""
+                        if kind == 'run':
+                            c_n = crew_costs(costs, n, now, ph)
+                            p_h = fail_prob(W['curve'], e['elapsed'], horizon)
+                            return {'cost': p_h * c_n.failure_loss, 'p': p_h, 'start': 0.0,
+                                    'sub': f'{horizon:.0f}시간 안 고장 확률 {p_h:.0%} · 그 뒤에도 고장 위험 남음 ({1 - p_h:.0%})',
+                                    'fix_h': c_n.repair_h}
+                        if kind == 'now':
+                            c_n = crew_costs(costs, n, now + now_start, ph)
+                            o = next(o for o in options(e['wait_h'], W['curve'], replace(cfg, crew_wait_h=base_wait, costs=c_n), e['elapsed'],
+                                                        stock=W['stock'][sid], plan_part=e['plan_part']) if o['선택지'].startswith('지금'))
+                            return {'cost': o['기대 총비용'], 'p': o['고장 확률'], 'start': now_start,
+                                    'sub': f'{o["선택지"]} · 교체 {c_n.replace_h:.1f}시간'}
+                        # 다음 정기 교체: 엔진 조건(최대 대기·부품·정비팀) 밖이거나 계획이 없으면 비교용으로만 계산한다
+                        has_plan = pd.notna(e['wait_h'])
+                        c_n = crew_costs(costs, n, now + (e['wait_h'] if has_plan else PLAN_GUESS_H), ph)
+                        cfg_n = replace(cfg, crew_wait_h=base_wait, costs=c_n)
+                        o = next((o for o in options(e['wait_h'], W['curve'], cfg_n, e['elapsed'], stock=W['stock'][sid],
+                                                     plan_part=e['plan_part']) if not o['선택지'].startswith('지금')), None)
+                        if o is not None:
+                            return {'cost': o['기대 총비용'], 'p': o['고장 확률'], 'start': float(e['wait_h']), 'sub': o['선택지'], 'note': ''}
+                        loose = replace(cfg_n, max_wait_h=1e9, prep_h=0.0)
+                        guesses = tuple(d for d in (PLAN_GUESS_H, 2 * PLAN_GUESS_H) if d > base_wait) or (int(np.ceil(base_wait)) + PLAN_GUESS_H,)
+                        for d_ in ((None,) if has_plan else ()) + guesses:
+                            po_ = [o for o in options(e['wait_h'] if d_ is None else np.nan, W['curve'], loose, e['elapsed'], delay_h=d_,
+                                                      stock=W['stock'][sid], plan_part=e['plan_part']) if not o['선택지'].startswith('지금')]
+                            if po_:
+                                note = (f'다음 정기 교체({e["wait_h"]:.0f}시간 뒤)는 최대 대기·부품·정비팀 조건 밖이라 비교만 합니다. ' if d_ is None else
+                                        (f'다음 정기 교체({e["wait_h"]:.0f}시간 뒤)에는 부품을 맞출 수 없어' if has_plan else '정기 교체 계획이 없어')
+                                        + f' 다음 정기 교체 칸은 {d_}시간 뒤 정지를 가정해 비교만 합니다. ')
+                                return {'cost': po_[0]['기대 총비용'], 'p': po_[0]['고장 확률'], 'note': note,
+                                        'start': float(e['wait_h']) if d_ is None else float(d_),
+                                        'sub': (f'{e["wait_h"]:.0f}시간 뒤 · 조건 밖이라 비교만' if d_ is None else
+                                                ('정기 교체 때 부품을 맞출 수 없음' if has_plan else '정기 교체 계획 없음') + f' · {d_}시간 뒤 정지 가정')}
+                        return {'cost': None, 'p': np.nan, 'start': None, 'sub': '계산할 수 없음', 'note': ''}
+
+                    absent_now = TASKS.absent_at(now)
+                    open_ = tf[~tf['상태'].isin(['완료', '중단'])]
+                    busy_people = {m for v in open_['members'] for m in str(v).split(',') if m}
+                    team0 = list(tasks.TEAMS)[list(tasks.TEAMS).index(min(load, key=load.get))]
+                    KIND = [('now', '즉시 정비', '경보를 보고 지금 두 부품을 교체'),
+                            ('plan', '다음 정기 교체', '정해 둔 정기 교체(계획 정지) 때 두 부품을 함께 교체'),
+                            ('run', '사후정비', '지금은 운전을 계속하고, 고장 나면 복구 (비교 기간 안 고장 확률 × 고장 손실)')]
+                    picks = {}
+                    for kind, _, _ in KIND:     # 칸마다 고른 팀·작업자 (위젯보다 먼저 읽어서 금액을 바로 맞춘다)
+                        tk = f'team_{kind}_{sid}'
+                        team_ = st.session_state.get(tk, team0)
+                        avail = [m for m in tasks.TEAMS[team_] if m not in absent_now]
+                        mk = f'mem_{kind}_{sid}_{team_}'
+                        if mk not in st.session_state:
+                            st.session_state[mk] = avail[:4]          # 기본: 반장부터 출근한 사람 4명
+                        st.session_state[mk] = [m for m in st.session_state[mk] if m in avail]
+                        picks[kind] = (tk, team_, avail, mk, st.session_state[mk])
+                        vals[kind] = card_values(kind, max(1, len(st.session_state[mk])))
+                    priced = {k: v['cost'] for k, v in vals.items() if v['cost'] is not None}
+                    rec_kind = min(priced, key=priced.get) if priced else None
+                    for col, (kind, label, help_) in zip(st.columns(3, border=True), KIND):
+                        v = vals[kind]
+                        tk, team_, avail, mk, sel = picks[kind]
                         with col:
-                            st.metric(label + (' · 추천' if rec else ''), manwon(cost) if cost is not None else '—', help=help_)
-                            st.caption(sub)
-                            if can_assign and cost is not None:
-                                st.selectbox('담당 팀', list(tasks.TEAMS), index=team0, key=f'team_{kind}_{sid}',
+                            st.metric(label + (' · 추천' if kind == rec_kind else ''), manwon(v['cost']) if v['cost'] is not None else '—', help=help_)
+                            st.caption(v['sub'])
+                            if pd.notna(v['p']) and v['p'] > cfg.safety_max:
+                                st.markdown(f':orange-badge[:material/warning: 안전 기준 초과: 고장 확률 {v["p"]:.0%} > {cfg.safety_max:.0%}]')
+                            if can_assign and v['cost'] is not None:
+                                st.selectbox('담당 팀', list(tasks.TEAMS), key=tk, index=list(tasks.TEAMS).index(team_),
                                              format_func=lambda k: f'{k} · 열린 작업 {load[k]}건')
+                                st.multiselect('작업자', avail, key=mk, placeholder='작업자를 고르세요',
+                                               format_func=lambda m: m + (' (반장)' if m in tasks.LEADERS.values() else '')
+                                               + (' (작업 중)' if m in busy_people else ''))
+                                off = [f'{m}({absent_now[m]})' for m in tasks.TEAMS[team_] if m in absent_now]
+                                if off:
+                                    st.caption('부재: ' + ', '.join(off))
+                                if 0 < len(sel) < 4:
+                                    st.markdown(f':orange-badge[:material/groups: 인원 부족 (4명 기준) · '
+                                                f'{"고장 복구" if kind == "run" else "교체"} '
+                                                f'{(WORK_REPAIR if kind == "run" else WORK_REPLACE) / len(sel):.1f}시간]')
+                                title_ = {'now': f'{sid} 지금 두 부품 교체', 'plan': f'{sid} 다음 정기 교체 때 두 부품 교체',
+                                          'run': f'{sid} 사후정비: 운전 계속 · 고장 나면 복구'}[kind]
+                                prio_ = {'now': '긴급' if urgent else '높음', 'plan': '높음', 'run': '보통'}[kind]
                                 st.button('작업자 화면으로 배정', icon=':material/send:', key=f'assign_{kind}_{sid}', width='stretch',
-                                          type='primary' if rec else 'secondary', on_click=assign_from_card,
-                                          args=(sid, f'team_{kind}_{sid}', job[0], job[1], job[2],
-                                                f'{sid} · {srow["상태"]} · {label} 선택 · 기대 비용 {manwon(cost)}', job[3]))
+                                          type='primary' if kind == rec_kind else 'secondary', disabled=not sel, on_click=assign_from_card,
+                                          args=(sid, tk, mk, title_, prio_, now + (v['start'] or 0.0),
+                                                f'{sid} · {srow["상태"]} · {label} 선택 · 기대 비용 {manwon(v["cost"])}', label))
                     if existing:
                         when = '' if existing['created_h'] <= now else f' ({clock(existing["created_h"])}에 만든 작업)'
                         st.warning(f'이미 작업 #{int(existing["id"])} · {existing["title"]} ({existing["team"]}){when}이 있어 다시 배정하지 않습니다. '
@@ -1566,17 +1645,26 @@ else:
                             st.text_area('점검 가이드', value=tasks.DEFAULT_GUIDE, height=140, max_chars=tasks.LIMITS['guide'],
                                          key=f'guide_txt_{sid}')
                             st.text_input('추천 이유에 덧붙일 말', max_chars=200, key=f'reason_txt_{sid}')
-                        st.caption('칸에서 배정하면 그 선택지로 작업이 만들어지고, 그 팀 작업자 화면의 "지금 할 일"에 바로 나타납니다.')
+                        st.caption('칸에서 배정하면 그 선택지와 작업자로 작업이 만들어지고, 그 팀 작업자 화면의 "지금 할 일"에 바로 나타납니다. '
+                                   f'비교 기간: 지금 ~ {clock(now + horizon)} ({"다음 정기 정지" if pd.notna(e["wait_h"]) else "정기 정지 계획이 없어 시연 끝"}까지)')
                     order_buttons(sid, sstage, True, b['선택지'], cfg, W)
                 else:
                     assign_box(sid, srow, sstage, job_, dec_i, W, cfg, load, border=False)
             # 상자 아래: 설명 → 접힌 칸
             if alarm:
-                st.markdown(f'- 고장 나면 드는 돈(정지·생산 차질·복구): **{manwon(costs.failure_loss)}**\n'
-                            f'- 추천 조치({b["선택지"]})의 기대 비용: **{manwon(b["기대 총비용"])}** · 끝나기 전에 고장 날 확률: '
-                            f'**{b["고장 확률"]:.0%}** (안전 기준 {cfg.safety_max:.0%})'
-                            + (f'\n- 고장 난 뒤 고치는 것보다 **{manwon(costs.failure_loss - b["기대 총비용"])}** 적게 듭니다'
-                               if costs.failure_loss > b['기대 총비용'] else ''))
+                lab = {'now': '즉시 정비', 'plan': '다음 정기 교체', 'run': '사후정비'}
+                if rec_kind is not None:
+                    rv, run_v = vals[rec_kind], vals['run']
+                    lines_ = [f'- 고장 나면 드는 돈(정지·생산 차질·복구, 사후정비 칸 작업자 기준): **{manwon(run_v["cost"] / run_v["p"]) if run_v["p"] > 0 else "—"}**',
+                              f'- 추천({lab[rec_kind]})의 기대 비용: **{manwon(rv["cost"])}** · '
+                              + (f'비교 기간 안 고장 확률 **{rv["p"]:.0%}**' if rec_kind == 'run' else f'끝나기 전에 고장 날 확률 **{rv["p"]:.0%}**')
+                              + f' (안전 기준 {cfg.safety_max:.0%})']
+                    if rec_kind != 'run' and run_v['cost'] > rv['cost']:
+                        lines_.append(f'- 사후정비(기대 비용)보다 **{manwon(run_v["cost"] - rv["cost"])}** 적게 듭니다')
+                    if rec_kind == 'run':
+                        lines_.append('- 이 설비는 지금 세우는 것보다 **운전을 계속하고 고장 나면 복구하는 쪽**의 기대 비용이 낮습니다. '
+                                      '다만 비교 기간 뒤에도 고장 위험이 남고, 안전 기준을 넘으면 현장 판단이 먼저입니다.')
+                    st.markdown('\n'.join(lines_))
                 with st.expander('이 설비 비용 가정', icon=':material/tune:'):
                     st.markdown(f'- 지금 두 부품 교체 비용: **{manwon(now_opt["정비 비용"])}** (교체 {costs.replace_h:.0f}시간)\n'
                                 f'- 계획 밖 정지 1시간 생산 차질: **{manwon(costs.downtime_h)}**\n'
@@ -1595,7 +1683,7 @@ else:
                     st.caption(f'기대 총비용 = (1 − P) × (정비 비용 + 생산 차질) + P × 고장 시 손실 · P = 정비를 마치기 전에 고장 날 확률. '
                                f'추천 = 완료 전 고장 확률이 안전 기준({cfg.safety_max:.2f}) 이하인 선택지 중 기대 총비용이 가장 낮은 것. '
                                + ('어떤 선택지도 안전 기준을 못 지켜 가장 빨리 할 수 있는 조치를 권합니다. ' if e['urgent'] else '')
-                               + plan_note + '최소 비용과 실제 권장 조치는 다를 수 있습니다. 안전·현장 절차 우선.')
+                               + vals.get('plan', {}).get('note', '') + '최소 비용과 실제 권장 조치는 다를 수 있습니다. 안전·현장 절차 우선.')
 
         def equipment_list(ids, key_prefix, on_pick=pick_equipment, selected=None, compact=False):
             """설비 목록: 버튼 한 줄 = 설비 하나 (상태 색 점 · 이름 · 상태 · 24시간 내 고장 위험 · 작업 지시 상태 · 시나리오 번호).
@@ -1667,8 +1755,9 @@ else:
             sid = sid_ if sid_ in t.index else t.index[0]
             st.subheader('정비 의사결정', icon=':material/balance:')
             st.session_state.setdefault('mhome', EQUIP)    # 기본값은 세션에서만 (go_home이 이 값을 바꾼다)
-            home = st.segmented_control('홈 범주', [EQUIP, ORDERS], key='mhome', required=True, label_visibility='collapsed',
-                                        format_func=lambda x: {EQUIP: f':material/sensors: {EQUIP}', ORDERS: f':material/assignment: {ORDERS}'}[x])
+            home = st.segmented_control('홈 범주', [EQUIP, ORDERS, STAFF], key='mhome', required=True, label_visibility='collapsed',
+                                        format_func=lambda x: {EQUIP: f':material/sensors: {EQUIP}', ORDERS: f':material/assignment: {ORDERS}',
+                                                               STAFF: f':material/badge: {STAFF}'}[x])
             if home == EQUIP:
                 # 칸마다 그 상태의 설비 전부를 칸 안 스크롤 목록으로 (2026-10-21 강사 피드백). 칸 제목을 누르면 넓은 목록 화면
                 st.html('<style>'
@@ -1687,7 +1776,7 @@ else:
                         card(stage_, len(ids_s) if (stage_ != '주의' or CAUTION) else '—', stage_, open_view, (stage_,), HELP[stage_])
                         with st.container(height=440, border=False):
                             equipment_list(ids_s, f'hl{k_}', compact=True)
-            else:
+            elif home == ORDERS:
                 k1, k2, k3, k4, k6, k5 = st.columns(6)
                 with k6.container(border=True):
                     st.metric('중단', int((tf['상태'] == '중단').sum()) if len(tf) else 0, help='작업자가 현장 상황 때문에 끝내지 못하고 중단한 작업')
@@ -1733,8 +1822,8 @@ else:
                                     np.where(shown['action_why'] != '', '지시와 다름: ' + shown['action_why'], ''))
                     st.dataframe(shown.assign(confirmed=shown['confirmed'].map(lambda x: PART_NAMES.get(x, x)), due_h=shown['due_h'].map(clock),
                                               name=shown['sid'].map(nm), act=act_, why=why_)[
-                        ['id', 'name', 'title', 'team', 'priority', '상태', '구분', 'due_h', 'act', 'outcome', 'confirmed', 'why']].rename(columns={
-                        'id': '번호', 'name': '설비', 'title': '작업', 'team': '팀', 'priority': '우선순위', 'due_h': '예정', 'act': '실제 조치',
+                        ['id', 'name', 'title', 'team', 'members', 'priority', '상태', '구분', 'due_h', 'act', 'outcome', 'confirmed', 'why']].rename(columns={
+                        'id': '번호', 'name': '설비', 'title': '작업', 'team': '팀', 'members': '작업자', 'priority': '우선순위', 'due_h': '예정', 'act': '실제 조치',
                         'outcome': '완료 결과', 'confirmed': '확인된 원인', 'why': '사유'}), hide_index=True,
                         column_config={'사유': st.column_config.TextColumn(width='large')})
                     with st.container(horizontal=True):
@@ -1744,6 +1833,68 @@ else:
                                            mime='text/csv', icon=':material/download:')
                     if st.session_state.get('task_edit'):
                         task_editor(tf)
+            else:
+                # 인원 현황 (2026-10-21): 사람마다 부재 종류·기간을 고른다. 저장하면 공용 저장소에 남아 모든 화면에 반영
+                #   (작업자 고르기 · 팀 하루 작업 한도 · 칸별 비용). 처음은 전원 출근, 라이브 데모 때 시나리오에 맞춰 바꾼다
+                absent_now = TASKS.absent_at(now)
+                for col, (team_, mem) in zip(st.columns(len(tasks.TEAMS), border=True), tasks.TEAMS.items()):
+                    on = [m for m in mem if m not in absent_now]
+                    cap = len(on) * A['crew_day_h']
+                    with col:
+                        st.metric(f'{team_} 지금 출근', f'{len(on)} / {len(mem)}명')
+                        st.caption(f'하루 작업 한도 {cap:.0f}인·시 (교체 {int(cap // WORK_REPLACE)}번) · '
+                                   + (('부재: ' + ', '.join(f'{m}({absent_now[m]})' for m in mem if m in absent_now)) if len(on) < len(mem)
+                                      else '전원 출근'))
+                ab = TASKS.absences()
+                day_h = lambda h: (int(h // 24) + 1, int(h % 24))
+                rows = []
+                for team_, mem in tasks.TEAMS.items():
+                    for m in mem:
+                        mine = ab[ab['name'] == m]
+                        if mine.empty:
+                            rows.append({'이름': m, '팀': team_, '부재 종류': '없음', '시작 일차': 1, '시작 시': 0, '끝 일차': 1, '끝 시': 0, '메모': ''})
+                        for r in mine.itertuples():
+                            (d1, h1), (d2, h2) = day_h(r.start_h), day_h(r.end_h)
+                            rows.append({'이름': m, '팀': team_, '부재 종류': r.kind, '시작 일차': d1, '시작 시': h1,
+                                         '끝 일차': d2, '끝 시': h2, '메모': r.note})
+                st.markdown('##### :material/badge: 인원별 부재')
+                st.caption(f'부재 종류를 고르고 기간(시연 시각 기준 일차 · 시)을 정한 뒤 저장하세요. 끝 시각은 그 시각부터 출근입니다. '
+                           f'한 사람이 두 번 이상 빠지면 아래 + 로 줄을 더합니다. 지금 {clock(now)} 기준')
+                edited = st.data_editor(
+                    pd.DataFrame(rows), key=f'absence_editor_{st.session_state.get("absence_ver", 0)}', num_rows='dynamic', hide_index=True,
+                    width='stretch',
+                    column_config={
+                        '이름': st.column_config.SelectboxColumn('이름', options=list(tasks.TEAM_OF), required=True),
+                        '팀': st.column_config.TextColumn('팀', disabled=True, help='저장할 때 이름으로 정해집니다'),
+                        '부재 종류': st.column_config.SelectboxColumn('부재 종류', options=['없음', *tasks.ABSENCE_KINDS], required=True),
+                        '시작 일차': st.column_config.SelectboxColumn('시작 일차', options=[1, 2, 3, 4], required=True),
+                        '시작 시': st.column_config.SelectboxColumn('시작 시', options=list(range(24)), required=True),
+                        '끝 일차': st.column_config.SelectboxColumn('끝 일차', options=[1, 2, 3, 4, 5], required=True),
+                        '끝 시': st.column_config.SelectboxColumn('끝 시', options=list(range(24)), required=True),
+                        '메모': st.column_config.TextColumn('메모', max_chars=100)})
+                PRESET_SHORT = [('강태윤', '연차', 24, 48, ''), ('조성민', '교육', 33, 42, '안전 교육'), ('윤재혁', '출장', 24, 48, ''),
+                                ('장현우', '병가', 0, 48, ''), ('최민재', '출산휴가', 0, 72, '배우자 출산'), ('박지훈', '반차(오전)', 33, 37, '')]
+                with st.container(horizontal=True):
+                    go_save = st.button('저장', icon=':material/save:', type='primary', key='absence_save')
+                    go_clear = st.button('전원 출근으로 되돌리기', icon=':material/restart_alt:', key='absence_clear')
+                    go_short = st.button('예시 채우기: 인원 부족 (2일차 정비 2팀 대부분 부재)', icon=':material/group_off:', key='absence_preset')
+                if go_save or go_clear or go_short:
+                    if go_save:
+                        new_rows = [{'name': r['이름'], 'kind': r['부재 종류'], 'start_h': (int(r['시작 일차']) - 1) * 24 + int(r['시작 시']),
+                                     'end_h': (int(r['끝 일차']) - 1) * 24 + int(r['끝 시']), 'note': r['메모'] or ''}
+                                    for r in edited.dropna(subset=['이름', '부재 종류']).to_dict('records') if r['부재 종류'] != '없음']
+                    else:
+                        new_rows = [] if go_clear else [{'name': n_, 'kind': k_, 'start_h': a_, 'end_h': b_, 'note': m_}
+                                                        for n_, k_, a_, b_, m_ in PRESET_SHORT]
+                    try:
+                        n_saved = TASKS.save_absences(new_rows)
+                    except (ValueError, TypeError) as err:
+                        st.error(str(err), icon=':material/error:')
+                    else:
+                        st.session_state['absence_ver'] = st.session_state.get('absence_ver', 0) + 1   # 표를 저장된 값으로 새로 그린다
+                        st.toast(f'부재 {n_saved}건을 저장했습니다' if n_saved else '전원 출근으로 바꿨습니다', icon=':material/badge:')
+                        st.rerun()
+                st.caption('부재 중인 사람은 작업자 고르기에서 빠지고, 팀 하루 작업 한도(출근 인원 × 8시간)와 칸별 비용(인·시)에 바로 반영됩니다.')
 
         st.session_state.setdefault('sid', sid)
     if sub not in MANAGER_TABS and SHOW_SUBPAGE_LIST:

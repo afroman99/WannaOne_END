@@ -387,18 +387,6 @@ def open_task_edit(tid=None):
         st.session_state['edit_tid'] = tid
 
 
-def search_go(ids):
-    """설비 검색 (입력칸 엔터 콜백): 상태 필터와 상관없이 맞는 설비 중 가장 맞는 것(같으면 위험한 순서)을 바로 연다"""
-    kw = st.session_state.get('scenario_search', '')
-    st.session_state.pop('search_miss', None)
-    hits = find_equipment(kw, ids)
-    if hits:
-        pick_equipment(hits[0])
-        st.session_state['scenario_search'] = ''     # 홈으로 돌아오면 전체 목록이 다시 보이게
-    elif search_key(kw):
-        st.session_state['search_miss'] = kw.strip()
-
-
 apply_url()
 
 
@@ -434,7 +422,7 @@ LINE_NO = {'test': 1, 'validation': 2}
 
 @st.cache_data
 def split_ids(split_):
-    """데이터 세트의 시나리오 번호 (검색에서 다른 세트에 있는 설비를 알려 줄 때 쓴다)"""
+    """데이터 세트의 시나리오 번호 (가상 설비 이름을 붙이는 순서)"""
     if CLOUD:
         return tuple(sorted(get_app_data()[1][split_][0]['SCENARIO_ID'].unique()))
     return tuple(sorted(load_scenarios().query('SPLIT == @split_')['SCENARIO_ID']))
@@ -456,22 +444,6 @@ NAMES = equipment_names(split)
 def nm(sid):
     """화면에 크게 보일 설비 이름"""
     return NAMES.get(sid, sid)
-
-
-def search_key(text):
-    """검색 비교용: 소문자, 빈칸·# 빼기, '1연주 6'과 '1연주 #06'을 같게"""
-    k = re.sub(r'[\s#]', '', str(text).lower())
-    m = re.fullmatch(r'(\d+)연주0*(\d+)', k)
-    return f'{m.group(1)}연주{int(m.group(2)):02d}' if m else k
-
-
-def find_equipment(text, ids):
-    """검색어에 맞는 설비 (ids 순서 = 위험한 순서). 이름·번호가 딱 맞는 것을 먼저"""
-    k = search_key(text)
-    if not k:
-        return []
-    hits = [s for s in ids if k in search_key(s) or k in search_key(nm(s))]
-    return sorted(hits, key=lambda s: k not in (search_key(s), search_key(nm(s))))
 
 
 @st.cache_data
@@ -1490,29 +1462,6 @@ else:
                         card(stage_, len(ids_s) if (stage_ != '주의' or CAUTION) else '—', stage_, open_view, (stage_,), HELP[stage_])
                         with st.container(height=440, border=False):
                             equipment_list(ids_s, f'hl{k_}', compact=True)
-                # 설비 검색: 엔터 = 상태와 상관없이 바로 그 설비 화면
-                ids_all = t.index.tolist()
-                st.text_input('설비 검색', placeholder=f'예: {nm(ids_all[0])} 또는 {ids_all[0]} · 엔터를 누르면 그 설비 화면이 열립니다',
-                              key='scenario_search', on_change=search_go, args=(ids_all,), icon=':material/search:')
-                rng = []
-                for lab_, sp_ in SPLITS.items():
-                    ii = split_ids(sp_)
-                    txt = f'{lab_.split(" ")[0]} {ii[0]} ~ {ii[-1]} ({len(ii)}대)' if ii else f'{lab_.split(" ")[0]} 없음'
-                    rng.append(f'**{txt} · 지금 보는 세트**' if sp_ == split else txt)
-                st.caption('시나리오 번호: ' + ' · '.join(rng))
-                miss = st.session_state.get('search_miss')
-                if miss:
-                    other = next(s_ for s_ in SPLITS.values() if s_ != split)
-                    other_hit = [s_ for s_ in split_ids(other) if search_key(miss) in (search_key(s_), search_key(equipment_names(other)[s_]))]
-                    st.warning(f'"{miss}"에 맞는 설비가 없습니다.'
-                               + (f' {other_hit[0]}은 다른 데이터 세트({next(k for k, v in SPLITS.items() if v == other)})의 설비입니다. '
-                                  '오른쪽 위 시연 설정에서 데이터 세트를 바꾸세요.' if other_hit else ''), icon=':material/search_off:')
-                kw = st.session_state.get('scenario_search', '')
-                if search_key(kw):
-                    hits_ = find_equipment(kw, ids_all)
-                    st.caption(f'검색 결과 {len(hits_)}대 (상태와 상관없이)')
-                    equipment_list(hits_, 'srch')
-                st.caption('설비 이름은 시연용 가상 이름입니다 (합성 데이터의 시나리오 하나 = 연주기 한 대로 가정, 회색 글씨가 시나리오 번호).')
             else:
                 k1, k2, k3, k4, k6, k5 = st.columns(6)
                 with k6.container(border=True):

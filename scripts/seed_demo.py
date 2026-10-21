@@ -135,6 +135,7 @@ def seed(store, log):
         log.record(kind, SPLIT, sid, h, M, **kw)
     store.set_setting('split', SPLIT)
     store.set_setting('now', str(NOW))
+    store.set_setting('clock_at', '')   # 멈춘 상태로 (시연에서 '적용'을 누르면 그때부터 흐른다)
     store.save_absences([])             # 전원 출근
 
 
@@ -158,6 +159,7 @@ def main():
     if a.empty:
         store.set_setting('split', SPLIT)
         store.set_setting('now', str(NOW))
+        store.set_setting('clock_at', '')   # 멈춘 상태로 (시연에서 '적용'을 누르면 그때부터 흐른다)
         store.save_absences([])
     else:
         seed(store, make_log())

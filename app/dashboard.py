@@ -27,6 +27,7 @@
 import json
 import re
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -227,6 +228,7 @@ ICONS = {WORKER: ':material/engineering:', MANAGER: ':material/manage_accounts:'
 st.session_state.setdefault('role', WORKER)       # 기본값은 세션 상태로만 정한다 (버튼으로 화면을 바꾸기 때문)
 st.session_state.setdefault('split_label', list(SPLITS)[0])
 st.session_state.setdefault('now', 72)
+st.session_state.setdefault('clock_at', None)
 # 재생 시각 함께 쓰기: 같이 보는 저장소면 설비관리자가 정한 데이터 세트·시각을 모든 화면이 따른다
 #   (따로 두면 관리자가 25시간에 배정한 작업을 작업자가 72시간에 시작해 관리자 화면에서는 '대기'로 남는다)
 CAN_SET_CLOCK = USER is None or USER['role'] == 'manager'
@@ -237,11 +239,30 @@ if TASKS.shared:
         st.session_state['split_label'] = _label
     if _now and _now.isdigit() and 0 <= int(_now) <= 72:
         st.session_state['now'] = int(_now)
+    _at = TASKS.setting('clock_at')
+    try:
+        st.session_state['clock_at'] = float(_at) if _at else None
+    except ValueError:
+        st.session_state['clock_at'] = None
+# 시각이 흐른다 (2026-10-21 8차): '적용'을 누른 순간부터 실제 시간과 같은 속도로. 시연 끝(4일차 00:00 = 72h)에서 멈춘다.
+#   now     = 판단 시각(정각): 예측 · 경보 · 비용은 1시간 요약본이라 정각마다 바뀐다
+#   now_f   = 흐르는 시각(소수 h): 작업 · 진행 기록을 남기고 읽는 시각, 화면 위 시계와 고장 타이머
+#   적용한 시연 시각(now)과 적용한 실제 시각(clock_at, 초)만 저장하고 흐르는 시각은 매번 계산한다 → 노트북 · 폰이 같은 값을 본다
+#   clock_at이 없으면(목업 스크립트로 맞춘 직후 등) 흐르지 않고 그 시각에 멈춰 있다
+END_H = 72
+
+
+def flow_hour():
+    at = st.session_state.get('clock_at')
+    h0 = float(st.session_state['now'])
+    return h0 if not at else min(float(END_H), h0 + max(0.0, time.time() - at) / 3600)
+
+
 # 적용한 값(split_label·now)과 고르는 칸(split_pick·now_pick)을 나눈다 (2026-10-21 버그 수정)
 #   전에는 슬라이더가 적용한 값을 바로 들고 있어서, 어느 화면의 슬라이더가 처음 값(1일차 00:00)을 보고하면
 #   그 값이 공용 저장소에 저장돼 모든 화면이 처음으로 돌아갔다. 이제는 '적용' 버튼을 눌러야만 저장한다.
 #   고르는 칸은 적용한 값이 바뀌었을 때만 따라간다 (적용 전에 옮기던 값은 그대로 둔다)
-_applied = (st.session_state['split_label'], st.session_state['now'])
+_applied = (st.session_state['split_label'], int(flow_hour()))     # 고르는 칸은 지금 흐르는 시각의 정각을 따라간다
 if st.session_state.get('_clock_seen') != _applied:
     st.session_state['_clock_seen'] = _applied
     st.session_state['split_pick'], st.session_state['now_pick'] = _applied
@@ -253,20 +274,52 @@ def apply_clock():
         return
     st.session_state['split_label'] = st.session_state['split_pick']
     st.session_state['now'] = int(st.session_state['now_pick'])
+    st.session_state['clock_at'] = time.time()      # 이 순간부터 흐른다
     if TASKS.shared:
         TASKS.set_setting('split', SPLITS[st.session_state['split_label']])
+        TASKS.set_setting('clock_at', repr(st.session_state['clock_at']))
         TASKS.set_setting('now', str(st.session_state['now']))
 
 
 split = SPLITS[st.session_state['split_label']]
-now = st.session_state['now']
+now_f = flow_hour()
+now = int(now_f)
+
+
+def clock_s(h):
+    """흐르는 시각을 초까지: 26.2 → '2일차 02:12:00'"""
+    sec = int(float(h) * 3600 + 1e-6)
+    d, sec = divmod(sec, 86400)
+    return f'{d + 1}일차 {sec // 3600:02d}:{sec % 3600 // 60:02d}:{sec % 60:02d}'
+
+
+# 화면에서 1초씩 움직이는 시계 · 고장 타이머 (브라우저가 같은 계산을 한다: 적용한 시연 시각 + 적용 뒤 흐른 실제 시간).
+#   서버는 처음 값만 그리고, 다시 그리기는 정각이 바뀔 때만 한다. 숫자는 data- 속성으로만 넘긴다(사용자 글 없음).
+#   st.html은 이 자리에서 스크립트를 빼므로, 보이지 않는 작은 칸(st.iframe, 같은 출처)에서 1초마다 화면의 칸을 고친다
+TICK_FRAME = ('<script>var D=window.parent.document,p=function(n){n=Math.floor(n);return(n<10?"0":"")+n};'
+              'setInterval(function(){var t=Date.now()/1000;'
+              'D.querySelectorAll("[data-cast-h0]").forEach(function(e){'
+              'var at=+e.dataset.castAt,h=+e.dataset.castH0;if(at>0)h=Math.min(+e.dataset.castEnd,h+Math.max(0,t-at)/3600);'
+              'if(e.dataset.castDl!==undefined){var s=Math.max(0,Math.floor((+e.dataset.castDl-h)*3600));'
+              'e.textContent=p(s/3600)+":"+p(s%3600/60)+":"+p(s%60);}'
+              'else{var s=Math.floor(h*3600+1e-6),d=Math.floor(s/86400);s-=d*86400;'
+              'e.textContent=(d+1)+"일차 "+p(s/3600)+":"+p(s%3600/60)+":"+p(s%60);}});},1000);</script>')
+
+
+def tick_attrs(deadline=None):
+    at = st.session_state.get('clock_at') or 0
+    return (f'data-cast-h0="{float(st.session_state["now"])!r}" data-cast-at="{float(at)!r}" data-cast-end="{END_H}"'
+            + ('' if deadline is None else f' data-cast-dl="{float(deadline)!r}"'))
 with st.container(horizontal=True, vertical_alignment='center', gap='medium'):
     st.markdown('### :material/shield: CAST-:blue[PdM]')
     st.caption('정비 의사결정 지원 솔루션 · 시연')
     st.space('stretch')
     # 시연 설정: 실제 운영에는 없는 재생용 값이라 한 곳에 접어 둔다 (지금 값은 버튼 이름에 보인다)
     #   key를 줘서 이름(지금 시각)이 바뀌어도 같은 칸으로 남게 한다
-    with st.popover(f'{st.session_state["split_label"].split(" ")[0]} · {clock(now)}', key='clock_pop',
+    st.html(f'<span style="font-variant-numeric: tabular-nums; font-weight: 600;"><span {tick_attrs()}>{clock_s(now_f)}</span></span>'
+            + ('' if st.session_state.get('clock_at') else ' <span style="opacity:.6">(멈춤 · 적용하면 흐름)</span>')
+            , width='content')
+    with st.popover(f'{st.session_state["split_label"].split(" ")[0]} · 시연 설정', key='clock_pop',
                     icon=':material/tune:', help='시연 설정: 데이터 세트와 지금 시각'):
         with st.form('clock_form', border=False):
             st.selectbox('데이터 세트', list(SPLITS), key='split_pick', disabled=not CAN_SET_CLOCK,
@@ -278,7 +331,8 @@ with st.container(horizontal=True, vertical_alignment='center', gap='medium'):
                                   width='stretch')
         show_truth = st.toggle('정답 보기 (검증 세트)', key='truth', disabled=split != 'validation',
                                help='앞으로 일어날 실제 고장 시각(정답)을 겹쳐 봅니다. 모델은 이 정보를 보지 않습니다.') and split == 'validation'
-        st.caption(f'지금: **{st.session_state["split_label"]} · {clock(now)}** · 옮긴 뒤 "적용"을 눌러야 바뀝니다  \n'
+        st.caption(f'지금: **{st.session_state["split_label"]} · {clock_s(now_f)}** · 옮긴 뒤 "적용"을 눌러야 바뀝니다. '
+                   '적용한 순간부터 실제 시간과 같은 속도로 흐르고(4일차 00:00에서 멈춤), 예측 · 경보 · 비용은 1시간 요약본이라 정각마다 바뀝니다  \n'
                    '독립된 합성 시나리오를 재생합니다 · 실시간 설비 연결 아님'
                    + (' · 데이터 세트와 시각은 모든 화면이 함께 씁니다' + ('' if CAN_SET_CLOCK else ' (설비관리자가 바꿈)')
                       if TASKS.shared else ''))
@@ -287,6 +341,8 @@ with st.container(horizontal=True, vertical_alignment='center', gap='medium'):
             st.caption(USER['email'])
             st.markdown('설비관리자' if USER['role'] == 'manager' else f'작업자 · {USER["team"]}')
             st.button('로그아웃', icon=':material/logout:', on_click=st.logout)
+if st.session_state.get('clock_at') and now < END_H:
+    st.iframe(TICK_FRAME, height=1)     # 시계가 흐를 때만 (멈춰 있으면 고칠 것이 없다)
 # 주소(URL)와 화면 위치를 맞춘다 → 브라우저·마우스의 뒤로 가기/앞으로 가기가 된다
 #   ?view=m (설비관리자) &page=설비 상세|정책·비용|... (관리자 하위 페이지) &sid=S0294. 작업자는 내 작업 하나라 주소가 비어 있다
 #   Streamlit은 st.query_params를 바꾸면 기록을 하나 쌓고(pushState), 뒤로 가기로 주소가 바뀌면 그 주소로 다시 실행한다.
@@ -621,7 +677,7 @@ def stock_now(cfg):
     for r in mnt_now[mnt_now['종류'] == '고장 후 복구'].itertuples():
         if r.PART_CD in PARTS:
             out[r.SCENARIO_ID][r.PART_CD] = max(0, out[r.SCENARIO_ID][r.PART_CD] - 1)
-    lg = LOG.frame(split, now)
+    lg = LOG.frame(split, now_f)
     # 작업 완료마다 실제 조치(기록의 '선택지')대로 부품을 쓴다: 두 부품 2개 · 한 부품 1개 · 교체 안 함 0개 (2026-10-21).
     #   예전 기록·설비관리자가 바꾼 완료는 선택지가 비어 있어 두 부품으로 본다.
     #   설비관리자가 완료를 되돌린 기록('… 완료 → …')은 두 부품만큼 돌려놓는다
@@ -644,7 +700,7 @@ def stock_now(cfg):
 
 def in_transit(cfg):
     """아직 도착하지 않은 발주 {sid: [(부품, 도착 시각, 긴급 여부)]}"""
-    lg = LOG.frame(split, now)
+    lg = LOG.frame(split, now_f)
     out = {}
     for _, r in lg[lg['종류'] == '부품 발주'].iterrows():
         arrive = r['시각(h)'] + (cfg.parts.rush_h if r['선택지'] == '긴급' else cfg.parts.lead_h)
@@ -707,7 +763,7 @@ def work_plan(A, t):
     # 팀 하루 작업 한도 (2026-10-21, 인·시): 출근한 팀원 × 하루 8시간 ÷ 교체 1번 16인·시 = 팀당 하루 교체 수.
     #   전원 출근이면 5명 × 8 = 40인·시 → 2번 (예전 '팀당 하루 2대'와 같다). 부재가 있으면 줄어든다.
     #   순서·대기 계산은 작업 하나를 4명 · 4시간으로 본다 (팀 결정 A2: 고른 인원은 그 작업의 비용·시간에만)
-    absent_now = TASKS.absent_at(now)
+    absent_now = TASKS.absent_at(now_f)
     team_jobs = {k: int(sum(m not in absent_now for m in v) * crew_day_h // WORK_REPLACE) for k, v in tasks.TEAMS.items()}
     per_day = max(1, max(team_jobs.values()))
     slots = sorted(d * 24.0 + j * costs.replace_h for d in range(30) for n_ in team_jobs.values() for j in range(n_))
@@ -735,7 +791,7 @@ def work_plan(A, t):
                      '_start': (e['wait_h'] if b['선택지'].startswith('다음 정기') else b['정비 완료까지(h)'] - costs.replace_h)})
     dec = pd.DataFrame(rows)
     if len(dec):
-        state = LOG.job_state(split, now, MNT_START)
+        state = LOG.job_state(split, now_f, MNT_START)
         dec.insert(3, '방법', '점검 후 한 부품' if feedback()['ready'] else '두 부품')
         dec.insert(1, '조치', dec['설비 (시나리오)'].map(lambda x: state.get(x, '대기')))
     if len(dec):
@@ -766,7 +822,7 @@ def ontology_graph(A, t, with_decisions=True):
         decisions = [{'sid': r['설비 (시나리오)'], 'rank': r['순위'], 'constraint': r['제약'], 'best': r['추천'],
                       'options': r['_e']['opts']} for _, r in W['dec'].iterrows()]
     return ontology.build(now, status, signals, mnt_now, get_plans(split), decisions, cost_unit=unit, safety_max=safety,
-                          th=TH, cth=CTH, actions=LOG.frame(split, now), feedback=feedback())
+                          th=TH, cth=CTH, actions=LOG.frame(split, now_f), feedback=feedback())
 
 
 def guide_content(row):
@@ -973,7 +1029,7 @@ STAGE_DOT = {'경보': 'red', '주의': 'orange', '정상': 'green', '정비 중
 
 def act(kind, sid, role_, note_key=None, **kw):
     """조치 기록 버튼 콜백: 기록하고 알림 (note_key: 메모 입력칸의 key)"""
-    LOG.record(kind, split, sid, now, role_, note=st.session_state.get(note_key, '') if note_key else '', **kw)
+    LOG.record(kind, split, sid, flow_hour(), role_, note=st.session_state.get(note_key, '') if note_key else '', **kw)
     st.toast(f'{sid}: {kind}', icon=':material/check_circle:')
 
 
@@ -990,18 +1046,18 @@ def fmt_cost(x, costs):
 
 
 def start_task(tid, sid):
-    if TASKS.start(tid, now):
-        LOG.record('작업 시작', split, sid, now, WORKER)
+    if TASKS.start(tid, flow_hour()):
+        LOG.record('작업 시작', split, sid, flow_hour(), WORKER)
         st.toast(f'{sid}: 작업 시작', icon=':material/play_arrow:')
 
 
 def urgent_create(sid, team, option):
     """즉시 조치 설비 (2026-10-21 7차): 배정 전이라도 현장이 작업을 만들고 그 작업 상세로 간다 (안전이 먼저).
     바로 시작하지 않는다: 관리자 구두 승인 · 설비 정지 · TBM 등 사전 절차를 체크해야 작업 시작이 켜진다"""
-    absent = TASKS.absent_at(now)
+    absent = TASKS.absent_at(now_f)
     mem = [m for m in tasks.TEAMS[team] if m not in absent][:4]
     try:
-        ok = TASKS.add(split, sid, f'{sid} 즉시 조치: 두 부품 교체', team, '긴급', now, now, tasks.DEFAULT_GUIDE,
+        ok = TASKS.add(split, sid, f'{sid} 즉시 조치: 두 부품 교체', team, '긴급', flow_hour(), flow_hour(), tasks.DEFAULT_GUIDE,
                        '지금 교체해도 완료 전 고장 확률이 안전 기준을 넘음 → 배정 전 현장이 긴급 작업을 만듦', option, mem)
     except ValueError as e:
         st.toast(str(e), icon=':material/error:')
@@ -1009,19 +1065,19 @@ def urgent_create(sid, team, option):
     if not ok:
         st.toast(f'{nm(sid)}: 이미 열린 작업이 있습니다', icon=':material/info:')
         return
-    w_open_task(int(TASKS.open_task(split, sid, now)['id']))
+    w_open_task(int(TASKS.open_task(split, sid, now_f)['id']))
     st.toast(f'{nm(sid)}: 즉시 조치 작업을 만들었습니다 · 사전 절차를 체크하세요', icon=':material/emergency:')
 
 
 def assign_task(sid, title, team, priority, due_h, guide, reason, option, members=(), leader=''):
     """작업 배정 = 정비 결정 승인 + 작업 지시 (같은 설비에 열린 작업이 있으면 배정하지 않는다)"""
     try:
-        ok = TASKS.add(split, sid, title, team, priority, due_h, now, guide, reason, option, members, leader)
+        ok = TASKS.add(split, sid, title, team, priority, due_h, flow_hour(), guide, reason, option, members, leader)
     except ValueError as e:
         st.toast(str(e), icon=':material/error:')
         return
     if ok:
-        LOG.record('승인', split, sid, now, MANAGER, option=option)
+        LOG.record('승인', split, sid, flow_hour(), MANAGER, option=option)
         st.toast(f'{sid}: {team}에 배정', icon=':material/assignment_ind:')
     else:
         st.toast(f'{sid}: 이미 열린 작업이 있어 배정하지 않았습니다', icon=':material/block:')
@@ -1029,9 +1085,9 @@ def assign_task(sid, title, team, priority, due_h, guide, reason, option, member
 
 def assign_box(sid, srow, sstage, job_, dec_i, W, cfg, load, border=True):
     """비용 비교 바로 아래의 실행 칸: 팀 고르고 배정(주 버튼 하나) · 보류 · 부품 발주. 세부 내용은 접어 둔다"""
-    existing = TASKS.blocking(split, sid, now)
+    existing = TASKS.blocking(split, sid, now_f)
     if existing:
-        when = '' if existing['created_h'] <= now else f' ({clock(existing["created_h"])}에 만든 작업)'
+        when = '' if existing['created_h'] <= now_f else f' ({clock(existing["created_h"])}에 만든 작업)'
         st.warning(f'이미 작업 #{int(existing["id"])} · {existing["title"]} ({existing["team"]}){when}이 있어 다시 배정하지 않습니다. '
                    '아래 "작업 수정하기"에서 고치거나 배정을 취소할 수 있습니다.', icon=':material/block:')
         st.button('작업 수정하기', icon=':material/edit:', key='edit_from_eq', on_click=open_task_edit, args=(int(existing['id']),))
@@ -1068,7 +1124,7 @@ def assign_box(sid, srow, sstage, job_, dec_i, W, cfg, load, border=True):
 def order_rush(sid, parts):
     """두 부품 긴급 조달 (콜백): 조달 중이 아닌 부품을 긴급으로 발주 기록"""
     for q in parts:
-        LOG.record('부품 발주', split, sid, now, MANAGER, part=q, option='긴급')
+        LOG.record('부품 발주', split, sid, flow_hour(), MANAGER, part=q, option='긴급')
     st.toast(f'{nm(sid)}: ' + ', '.join(PART_NAMES[q] for q in parts) + ' 긴급 조달', icon=':material/bolt:')
 
 
@@ -1108,7 +1164,7 @@ def cancel_task(tid, sid, title, why_key):
         st.toast('배정 취소 사유를 입력하세요', icon=':material/error:')
         return
     if TASKS.cancel(tid):
-        LOG.record('배정 취소', split, sid, now, MANAGER, note=f'#{tid} {title} · 사유: {why}')
+        LOG.record('배정 취소', split, sid, flow_hour(), MANAGER, note=f'#{tid} {title} · 사유: {why}')
         st.session_state.pop(why_key, None)
         st.session_state.pop('edit_tid', None)
         st.toast(f'{sid}: 배정을 취소했습니다. 다시 배정할 수 있습니다', icon=':material/undo:')
@@ -1326,6 +1382,8 @@ def task_editor(tf):
                 if not done_:   # 새로 완료로 바꿀 때만 완료 시각을 고른다 (이미 완료된 작업은 시각을 그대로 둔다)
                     lo_e = min(int(np.ceil(cur['started_h'] if pd.notna(cur['started_h']) else cur['created_h'])), int(now))
                     e_at = hour_pick('완료 시각', lo_e, now, now, f'edit_at_{tid}')
+                    if e_at == now:     # 지금 정각을 고르면 흐르는 지금 시각으로 (시작보다 앞서지 않게)
+                        e_at = now_f
                 pick = lambda opts, v, d: opts.index(v) if v in opts else opts.index(d)
                 e_out = st.selectbox('작업 결과', tasks.OUTCOMES, index=pick(tasks.OUTCOMES, cur['outcome'], '이상 발견'))
                 e_jud = st.selectbox('점검으로 판단한 부품', tasks.JUDGED, index=pick(tasks.JUDGED, cur['judged'], '구분 못함'),
@@ -1337,7 +1395,7 @@ def task_editor(tf):
             if st.form_submit_button('수정 저장', icon=':material/save:', type='primary'):
                 if not e_why.strip():
                     st.error('수정 사유를 입력해야 저장됩니다.', icon=':material/error:')
-                elif e_state != '완료' or done_ or pick_ok(e_at, lo_e, now):
+                elif e_state != '완료' or done_ or pick_ok(e_at, lo_e, now_f):
                     try:
                         TASKS.edit(tid, e_team, e_prio, e_due, e_guide, e_reason, [m for m in e_mem if tasks.TEAM_OF[m] == e_team], e_lead)
                         if e_state != cur['상태']:
@@ -1347,18 +1405,18 @@ def task_editor(tf):
                                 LOG.record('작업 완료', split, cur['sid'], e_at, MANAGER, note=f'상태 변경 #{tid}: {e_det}')
                                 LOG.record('점검 결과', split, cur['sid'], e_at, MANAGER, judged=e_jud, confirmed=e_con, note=e_out)
                             else:
-                                TASKS.set_status(tid, e_state, now)
+                                TASKS.set_status(tid, e_state, flow_hour())
                                 if done_:   # 되돌린 완료의 점검 결과는 같은 시각에 '아직 모름'으로 덮는다 (되먹임은 마지막 기록만 센다)
                                     LOG.record('점검 결과', split, cur['sid'], float(cur['completed_h']), MANAGER, judged='구분 못함',
                                                confirmed='아직 모름', note=f'완료 되돌림 #{tid}')
-                                LOG.record('작업 시작' if e_state == '진행 중' else '승인', split, cur['sid'], now, MANAGER,
+                                LOG.record('작업 시작' if e_state == '진행 중' else '승인', split, cur['sid'], flow_hour(), MANAGER,
                                            note=f'상태 변경 #{tid}: {cur["상태"]} → {e_state}')
                         elif done_:
                             TASKS.edit_report(tid, e_out, e_det, e_jud, e_con)
                             if (e_out, e_jud, e_con) != (cur['outcome'], cur['judged'], cur['confirmed']):
                                 LOG.record('점검 결과', split, cur['sid'], float(cur['completed_h']), MANAGER, judged=e_jud,
                                            confirmed=e_con, note=f'완료 보고 수정 #{tid}: {e_out}')
-                        LOG.record('작업 수정', split, cur['sid'], now, MANAGER, note=f'#{tid} 사유: {e_why.strip()}')
+                        LOG.record('작업 수정', split, cur['sid'], flow_hour(), MANAGER, note=f'#{tid} 사유: {e_why.strip()}')
                         st.toast(f'#{tid} 수정했습니다' + (f' ({cur["상태"]} → {e_state})' if e_state != cur['상태'] else ''),
                                  icon=':material/check_circle:')
                         st.rerun()
@@ -1412,7 +1470,7 @@ if role == WORKER:
     t = status_table()
     W = work_plan(A, t)
     dec, cfg, costs = W['dec'], W['cfg'], W['costs']
-    tf = TASKS.frame(split, now)
+    tf = TASKS.frame(split, now_f)
     dec_i = dec.set_index('설비 (시나리오)') if len(dec) else pd.DataFrame()
     st.session_state.setdefault('my_team', list(tasks.TEAMS)[0])
     if st.session_state.pop('w_scroll', False):
@@ -1457,8 +1515,8 @@ if role == WORKER:
 
     if wv is None:
         # 배정 전 즉시 조치 설비: 홈 칸 위에 빨간 알림. 누르면 작업을 만들고 그 작업 상세로 (시작은 사전 절차 뒤)
-        busy = TASKS.blocked_sids(split, now)
-        js = LOG.job_state(split, now, MNT_START)
+        busy = TASKS.blocked_sids(split, now_f)
+        js = LOG.job_state(split, now_f, MNT_START)
         done_ = {x for x, v in js.items() if v == '작업 완료'}     # 이번 운전 구간에서 이미 교체를 마친 설비
         urgent_un = [x for x in dec_i.index if dec_i.loc[x, '제약'].startswith('즉시') and x not in busy | done_] if len(dec_i) else []
         if urgent_un:
@@ -1607,15 +1665,15 @@ if role == WORKER:
                                                placeholder='예: 열어 보니 밸브만 마모, 진동장치는 정상')
                     details = st.text_area('수행 내용 (필수)', max_chars=tasks.LIMITS['details'],
                                            placeholder='예: 진동장치 베어링 마모 확인, 두 부품 교체 후 신호 정상')
-                    # 완료 시각: 작업 시작 ~ 지금 사이에서 고른다 (기본 지금). 재고·점검 집계가 이 시각을 쓴다
-                    lo_ = min(int(np.ceil(r['started_h'] if pd.notna(r['started_h']) else r['created_h'])), int(now))
-                    done_h = hour_pick('완료 시각', lo_, now, now, f'done_at_{tid}')
+                    # 완료 시각 = 제출하는 지금 (흐르는 시각, 2026-10-21 8차). 재고·점검 집계가 이 시각을 쓴다
+                    st.caption(f'완료 시각은 제출하는 순간의 시각으로 남습니다 (지금 {clock_s(now_f)})')
                     permit_after = st.checkbox('작업 허가서 사후 처리 완료 (즉시 조치는 필수)') if urgent_job else True
                     go_done = st.form_submit_button('완료 보고 제출', icon=':material/task_alt:', type='primary')
                 if go_done:
                     if not permit_after:
                         st.error('즉시 조치 작업은 작업 허가서를 사후 처리한 뒤 완료 보고를 제출하세요.', icon=':material/error:')
-                    elif pick_ok(done_h, lo_, now):
+                    else:
+                        done_h = flow_hour()
                         try:
                             done = TASKS.complete(tid, done_h, outcome, details, judged, confirmed, action, action_why)
                         except ValueError as e:
@@ -1646,12 +1704,12 @@ if role == WORKER:
                     go_stop = st.form_submit_button('작업 중단 제출', icon=':material/stop_circle:', type='primary')
                 if go_stop:
                     try:
-                        stopped = TASKS.stop(tid, now, stop_why)
+                        stopped = TASKS.stop(tid, flow_hour(), stop_why)
                     except ValueError as e:
                         st.error(str(e))
                     else:
                         if stopped:
-                            LOG.record('작업 중단', split, sid, now, WORKER, note=f'#{tid} 사유: {stop_why.strip()}')
+                            LOG.record('작업 중단', split, sid, flow_hour(), WORKER, note=f'#{tid} 사유: {stop_why.strip()}')
                             w_go()
                             st.toast(f'{nm(sid)}: 작업 중단 · 설비관리자에게 알렸습니다', icon=':material/stop_circle:')
                             st.rerun()
@@ -1680,9 +1738,9 @@ else:
         W = work_plan(A, t)
         dec, cfg, costs = W['dec'], W['cfg'], W['costs']
         dec_i = dec.set_index('설비 (시나리오)') if len(dec) else pd.DataFrame()
-        tf = TASKS.frame(split, now)
-        busy = TASKS.blocked_sids(split, now)      # 배정을 막는 작업이 있는 설비 (재생에서 미래에 만든 작업 포함, 배정 규칙과 같음)
-        js = LOG.job_state(split, now, MNT_START)
+        tf = TASKS.frame(split, now_f)
+        busy = TASKS.blocked_sids(split, now_f)      # 배정을 막는 작업이 있는 설비 (재생에서 미래에 만든 작업 포함, 배정 규칙과 같음)
+        js = LOG.job_state(split, now_f, MNT_START)
         load = team_load(tf)
         # 배정할 경보: 열린 작업이 없고, 보류하지 않았고, 이번 운전 구간에서 작업을 마치지 않은 경보 설비
         #   (재생 데이터에는 우리가 한 교체가 반영되지 않아 경보가 남으므로, 완료한 설비는 정비가 시작될 때까지 다시 올리지 않는다)
@@ -1781,7 +1839,14 @@ else:
                                            '목록으로 보여 줍니다. 판단은 경보 기준과 의사결정 규칙이 하고, 그래프는 그 근거를 이어 보여 줍니다.')
                 if g_right is not None:
                     with g_right:
-                        st.metric('고장 예상까지', hms(remain) if remain is not None else '—')
+                        # 1초씩 줄어드는 타이머 (2026-10-21 8차): 정각의 추정값(1시간 요약본)에서 흐르는 시각만큼 뺀다. 정각마다 새 추정으로 바뀐다
+                        if remain is None:
+                            st.metric('고장 예상까지', '—')
+                        else:
+                            st.html('<div style="font-size: 0.875rem; margin-bottom: 4px;">고장 예상까지</div>'
+                                    f'<div style="font-size: 2.25rem; line-height: 1.2; font-variant-numeric: tabular-nums;">'
+                                    f'<span {tick_attrs(now + remain)}>{hms(max(0.0, now + remain - now_f))}</span></div>'
+                                    '<div style="font-size: 0.8rem; opacity: .65; margin-top: 4px;">추정 · 정각마다 다시 계산</div>')
             # 정비 판단 상자 (2026-10-21): 즉시 정비 · 다음 정기 교체 · 사후정비를 같은 기준으로 비교하고 그 칸에서 배정
             #   같은 기준 = 같은 비교 기간(지금 ~ 다음 정기 정지, 계획이 없으면 시연 끝 72h) 안의 기대 비용,
             #   같은 비용 항목(부품 · 인건비(인·시, 정규 근무 밖 1.5배) · 정지 생산 차질 · 고장 손실). 칸마다 고른 작업자 수로 다시 계산
@@ -1789,7 +1854,7 @@ else:
             with st.container(border=True):
                 st.markdown(f'##### {nm(sid)} · 정비 판단')
                 if alarm:
-                    existing = TASKS.blocking(split, sid, now)
+                    existing = TASKS.blocking(split, sid, now_f)
                     can_assign = existing is None and job_ != '작업 완료'
                     urgent = r_['제약'].startswith('즉시')
                     base_wait = cfg.crew_wait_h + r_['_slot']
@@ -1834,7 +1899,7 @@ else:
                                                 ('정기 교체 때 부품을 맞출 수 없음' if has_plan else '정기 교체 계획 없음') + f' · {d_}시간 뒤 정지 가정')}
                         return {'cost': None, 'p': np.nan, 'start': None, 'sub': '계산할 수 없음', 'note': ''}
 
-                    absent_now = TASKS.absent_at(now)
+                    absent_now = TASKS.absent_at(now_f)
                     open_ = tf[~tf['상태'].isin(['완료', '중단'])]
                     busy_people = {m for v in open_['members'] for m in str(v).split(',') if m}
                     team0 = list(tasks.TEAMS)[list(tasks.TEAMS).index(min(load, key=load.get))]
@@ -1889,7 +1954,7 @@ else:
                                           args=(sid, tk, mk, lk, title_, prio_, now + (v['start'] or 0.0),
                                                 f'{sid} · {srow["상태"]} · {label} 선택 · 기대 비용 {manwon(v["cost"])}', label))
                     if existing:
-                        when = '' if existing['created_h'] <= now else f' ({clock(existing["created_h"])}에 만든 작업)'
+                        when = '' if existing['created_h'] <= now_f else f' ({clock(existing["created_h"])}에 만든 작업)'
                         st.warning(f'이미 작업 #{int(existing["id"])} · {existing["title"]} ({existing["team"]}){when}이 있어 다시 배정하지 않습니다. '
                                    '아래 "작업 수정하기"에서 고치거나 배정을 취소할 수 있습니다.', icon=':material/block:')
                         st.button('작업 수정하기', icon=':material/edit:', key='edit_from_eq', on_click=open_task_edit,
@@ -2094,7 +2159,7 @@ else:
             else:
                 # 인원 현황 (2026-10-21): 사람마다 부재 종류·기간을 고른다. 저장하면 공용 저장소에 남아 모든 화면에 반영
                 #   (작업자 고르기 · 팀 하루 작업 한도 · 칸별 비용). 처음은 전원 출근, 라이브 데모 때 시나리오에 맞춰 바꾼다
-                absent_now = TASKS.absent_at(now)
+                absent_now = TASKS.absent_at(now_f)
                 for col, (team_, mem) in zip(st.columns(len(tasks.TEAMS), border=True), tasks.TEAMS.items()):
                     on = [m for m in mem if m not in absent_now]
                     cap = len(on) * A['crew_day_h']
@@ -2271,7 +2336,7 @@ elif page == '의사결정':
     dec, need_crew, per_day, evaluate_options, cfg, costs, curve, pl = (W[k] for k in ['dec', 'need_crew', 'per_day', 'evaluate_options', 'cfg', 'costs', 'curve', 'pl'])
     n_crews, crew_day_h = A['n_crews'], A['crew_day_h']
 
-    jobs_state = LOG.job_state(split, now, MNT_START)
+    jobs_state = LOG.job_state(split, now_f, MNT_START)
 
     st.subheader(f'전체 정비 결정 · {len(dec)}건', icon=':material/event_note:')
     if dec.empty:
@@ -2358,7 +2423,7 @@ elif page == '의사결정':
                   help=f'맞힌 비율이 손익분기 {fb["breakeven"]:.2f} 이상이고 기록이 {actions.MIN_CONFIRMED}건 이상이면 "점검 후 한 부품"' if fb['breakeven'] else None)
         st.caption('센서로는 원인 부품을 구분할 수 없어(EDA E9) 지금은 두 부품을 함께 교체합니다. 현장이 점검 결과와 교체 뒤 확인된 원인을 입력하면, '
                    '점검으로 부품을 맞히는 비율이 쌓이고 이 값이 비용 계산기의 손익분기를 넘으면 추천이 바뀝니다.')
-        lg = LOG.frame(split, now)
+        lg = LOG.frame(split, now_f)
         if lg.empty:
             st.write('이 데이터 세트에서 지금 시각까지 기록된 조치가 없습니다.')
         else:
@@ -2388,7 +2453,7 @@ elif page == '의사결정':
 
                 def order_all():
                     for sid_, q_ in need_order:
-                        LOG.record('부품 발주', split, sid_, now, '정비 책임자', part=q_, option='정상', note='주의 단계 재고 부족')
+                        LOG.record('부품 발주', split, sid_, flow_hour(), '정비 책임자', part=q_, option='정상', note='주의 단계 재고 부족')
                     st.toast(f'부품 {len(need_order)}건 발주', icon=':material/local_shipping:')
                 st.button('한 번에 발주', icon=':material/local_shipping:', type='primary', on_click=order_all, key='order_all')
         st.dataframe(cd, hide_index=True)
@@ -2563,5 +2628,14 @@ def watch_changes():
         st.rerun(scope='app')
 
 
+@st.fragment(run_every=AUTO_REFRESH_S)
+def watch_hour():
+    """흐르는 시각이 정각을 넘으면 화면 전체를 다시 그린다 (예측 · 경보 · 비용이 1시간 요약본이라 정각마다 바뀐다)"""
+    if int(flow_hour()) != now:
+        st.rerun(scope='app')
+
+
 if TASKS.shared:
     watch_changes()
+if st.session_state.get('clock_at') and now < END_H:
+    watch_hour()

@@ -759,6 +759,113 @@ def action_guide(row):
         st.success('지금은 열화 신호가 없고, 24시간 안 고장 위험이 낮습니다.' if CAUTION else '지금은 24시간 안 고장 위험이 낮습니다.')
 
 
+def equipment_detail(sid, t, nested=False):
+    """설비 하나의 상태 자세히: 지표 네 칸 · 입력 감시 · 위험 확률 흐름 · 네 신호 흐름 · 지금 신호 상태 · 모델이 본 이유.
+    설비 페이지(하위 페이지)와 근거·비용 화면의 '설비 페이지' 접힌 칸(2026-10-21, nested=True)이 같이 쓴다"""
+    row = t.loc[sid]
+    c1, c2, c3, c4 = st.columns(4, border=True)
+    c1.metric('상태', row['상태'].split(' (')[0], help=row['상태'])   # 칸이 좁아 영문 이름은 도움말로
+    c2.metric('24시간 내 고장 위험', '—' if pd.isna(row['위험 확률']) else f'{row["위험 확률"]:.0%}',
+              help=f'마지막 예측: {clock(row["마지막 예측 (h)"])}' if pd.notna(row['마지막 예측 (h)']) else None)
+    if CAUTION:
+        c3.metric('지금 열화 중일 확률', '—' if pd.isna(row['열화 확률']) else f'{row["열화 확률"]:.2f}')
+        c4.metric('첫 주의 / 첫 경보', ' / '.join(clock(row[k]) for k in ['첫 주의 (h)', '첫 경보 (h)']))
+    else:
+        c3.metric('첫 경보', clock(row['첫 경보 (h)']))
+
+    # 조치 안내는 설비관리자 근거·비용 화면으로 옮겼다 (2026-10-21, action_guide)
+    if row['상태'] == WARN and row['경보 유지']:
+        st.caption('지금 확률은 경보 기준보다 낮지만, 이번 운전 구간에서 이미 경보가 켜져 정비 전까지 경보로 유지합니다.')
+    last_p = after_last_maintenance(pts_now[pts_now['SCENARIO_ID'] == sid], 'T_H').tail(1)
+    if 'OOR_N' in last_p and len(last_p) and last_p['OOR_N'].iloc[0] > 0:
+        st.warning(f'마지막 예측({last_p["T_H"].iloc[0]:.0f}시간)의 특징 {int(last_p["OOR_N"].iloc[0])}개가 '
+                   f'학습 때 본 범위(0.1~99.9%) 밖입니다: {last_p["OOR_FEATS"].iloc[0]}. '
+                   '아주 심한 열화이거나 센서 이상일 수 있어, 모델 확률만 믿지 말고 현장에서 센서와 설비를 확인하세요.',
+                   title='입력 감시: 센서 확인', icon=':material/sensors:')
+
+    # 위험 확률 흐름
+    p = pts_now[pts_now['SCENARIO_ID'] == sid].rename(columns={'STAGE': '단계'})
+    p['단계'] = p['단계'].replace(LABEL)
+    x = alt.X('T_H:Q', title='시나리오 시작 후 경과 시간 (h)', scale=alt.Scale(domain=[0, 72], nice=False))
+    tip = [alt.Tooltip('T_H', title='시각(h)'), alt.Tooltip('PROB', title='24시간 안 고장 확률', format='.2f'), '단계']
+    if CAUTION:
+        tip.insert(2, alt.Tooltip('DEGRADED_PROB', title='열화 확률', format='.2f'))
+    line = alt.Chart(p).mark_line(color=LINE_BLUE).encode(x=x, y=alt.Y('PROB:Q', title='확률', scale=alt.Scale(domain=[0, 1])))
+    dots = alt.Chart(p).mark_circle(size=90).encode(x=x, y='PROB:Q', color=alt.Color('단계:N', scale=STAGE_COLORS), tooltip=tip)
+    layers = [*mnt_layer(sid, 1), line, dots,
+              alt.Chart(pd.DataFrame({'y': [TH]})).mark_rule(color=ALARM_RED, strokeDash=[6, 3]).encode(y='y:Q')]
+    if CAUTION:
+        layers += [alt.Chart(p).mark_line(color=CAUTION_YELLOW, strokeDash=[2, 2]).encode(x=x, y='DEGRADED_PROB:Q', tooltip=tip),
+                   alt.Chart(pd.DataFrame({'y': [CTH]})).mark_rule(color=CAUTION_YELLOW, strokeDash=[6, 3]).encode(y='y:Q')]
+    st.subheader('위험 확률과 열화 확률' if CAUTION else '위험 확률', icon=':material/trending_up:')
+    show_chart(alt.layer(*layers).properties(height=280), width='stretch')
+    st.caption(('파란 선과 점: 24시간 안 고장 확률(점 색 = 단계) · 노란 점선: 지금 열화 중일 확률 · '
+                f'빨간 가로 점선: 경보 기준 {TH:.2f} · 노란 가로 점선: 주의 기준 {CTH:.2f}' if CAUTION
+                else f'점선: 경보 기준 {TH:.2f}')
+               + ' · 회색 띠: 정비 · 빨간 실선: 고장'
+               + (' · 빨간 점선: 앞으로 일어날 실제 고장 (정답)' if show_truth else ''))
+
+    # 네 신호 흐름
+    h = hr_now[hr_now['SCENARIO_ID'] == sid].rename(columns=SIGNAL_NAMES)
+    long = h.melt(id_vars=['DONE_H'], value_vars=list(SIGNAL_NAMES.values()), var_name='신호', value_name='점수')
+    sig = alt.Chart(long).mark_line(opacity=0.8).encode(
+        x=alt.X('DONE_H:Q', title='시나리오 시작 후 경과 시간 (h)', scale=alt.Scale(domain=[0, 72], nice=False)),
+        y=alt.Y('점수:Q', title='표준화 점수 (1 = 정상 경계)'), color='신호:N',
+        tooltip=['신호', alt.Tooltip('DONE_H', title='시각(h)'), alt.Tooltip('점수', format='.2f')])
+    avg = alt.Chart(h).mark_line(color=INK, strokeWidth=2.5).encode(
+        x='DONE_H:Q', y='SCORE:Q', tooltip=[alt.Tooltip('SCORE', title='네 신호 평균', format='.2f')])
+    one = alt.Chart(pd.DataFrame({'y': [1]})).mark_rule(color=INK, strokeDash=[2, 2]).encode(y='y:Q')
+    st.subheader('네 신호의 흐름', icon=':material/ssid_chart:')
+    show_chart(alt.layer(*mnt_layer(sid, None), sig, avg, one).properties(height=300), width='stretch')
+    st.caption('회색 굵은 선: 네 신호 평균 점수 · 점선: 정상 범위 경계(1). 정비 후 재가동하면 처음 2시간은 기준을 잡는 시간이라 비어 있습니다.')
+
+    # 지금 신호 상태와 모델 기여도
+    left, right = st.columns(2)
+    with left:
+        st.subheader('지금 신호 상태', icon=':material/sensors:')
+        cur = after_last_maintenance(h.assign(HOUR_START=h['DONE_H'] - 1), 'HOUR_START')
+        last = cur.dropna(subset=list(SIGNAL_NAMES.values())).tail(1)
+        if row['상태'] == '정비 중':
+            st.write('정비 중이라 신호가 없습니다.')
+        elif last.empty:
+            st.write('재가동 뒤 아직 계산된 신호가 없습니다. 재가동 후 처음 2시간은 기준을 잡는 시간입니다. '
+                     '(정비 전 신호는 지금 상태가 아니라서 보여 주지 않습니다.)')
+        else:
+            bar = last.melt(value_vars=list(SIGNAL_NAMES.values()), var_name='신호', value_name='점수')
+            bar['정상 범위'] = np.where(bar['점수'] > 1, '벗어남', '안')
+            show_chart(
+                alt.layer(
+                    alt.Chart(bar).mark_bar().encode(
+                        y=alt.Y('신호:N', title=None, sort='-x'), x=alt.X('점수:Q', title='표준화 점수'),
+                        color=alt.Color('정상 범위:N', scale=alt.Scale(domain=['벗어남', '안'], range=[ALARM_RED, OK_GRAY]))),
+                    alt.Chart(pd.DataFrame({'x': [1]})).mark_rule(strokeDash=[2, 2]).encode(x='x:Q'),
+                ).properties(height=180), width='stretch')
+            st.caption(f'{last["DONE_H"].iloc[0]:.0f}시간까지의 1시간 값. 1을 넘으면 정상 시나리오의 95%보다 많이 벗어난 것입니다.')
+    with right:
+        box = st.container() if nested else st.expander('자세히: 모델이 본 이유 (기여도)')   # 접힌 칸 안에 접힌 칸을 두지 않는다
+        with box:
+            if nested:
+                st.markdown('**모델이 본 이유 (기여도)**')
+            cp = after_last_maintenance(pts_now[pts_now['SCENARIO_ID'] == sid], 'T_H')
+            if contrib is None:
+                st.write(f'최종 모델({bundle["final"]["model"]})은 특징별 기여도를 계산할 수 없는 종류입니다. '
+                         '왼쪽의 신호 상태와 위의 신호 흐름으로 경보 이유를 확인하세요.')
+            elif cp.empty:
+                st.write(f'아직 예측이 없습니다. 정비가 시작되면 정비 전 예측은 쓰지 않고, 재가동 뒤 다음 예측 시점({STEP}시간마다)을 기다립니다.')
+            else:
+                cr = contrib.loc[cp.index[-1]].rename('기여도').reset_index().rename(columns={'index': '묶음'})
+                show_chart(alt.Chart(cr).mark_bar().encode(
+                    y=alt.Y('묶음:N', title=None, sort='-x'), x=alt.X('기여도:Q', title=f'위험을 올린 정도 ({contrib_unit})'),
+                    color=alt.condition('datum.기여도 > 0', alt.value(ALARM_RED), alt.value(LINE_BLUE))
+                ).properties(height=220), width='stretch')
+                st.caption(f'{cp["T_H"].iloc[-1]:.0f}시간 예측 기준. 양수는 위험을 올린 쪽, 음수는 내린 쪽입니다. '
+                           + ('나무마다 결정 경로를 따라 확률이 바뀐 양을 그 분기에 쓰인 특징 묶음에 나눠 준 값으로, '
+                              '기준값에 모두 더하면 위의 위험 확률이 됩니다. ' if contrib_unit.startswith('확률')
+                              else '0은 학습 세트 평균 시점입니다. ')
+                           + '네 신호와 결합 점수는 서로 비슷한 정보라 모델 안에서 서로 상쇄될 수 있습니다. '
+                           '묶음 하나의 크기보다 왼쪽의 신호 상태를 먼저 보세요.')
+
+
 def open_detail(table_key, ids):
     """표에서 고른 설비로 '설비 상세' 화면을 연다 (st.dataframe 선택 콜백)"""
     rows = st.session_state[table_key].selection.rows
@@ -1262,14 +1369,10 @@ else:
         def decision_panel(sid):
             """설비 하나의 정비 판단 (2026-10-21 3차 피드백)
             조치 안내 → 큰 상자: 예측정비 · 다음 정기 교체 · 사후정비 비용(만 원) → 배정·보류·부품 발주(보충·두 부품 긴급)
-            그 아래: 설명 → 접힌 칸(근거 사슬(온톨로지) · 비용 가정 · 비용 계산 근거)"""
+            그 아래: 설명 → 접힌 칸(설비 페이지 · 근거 사슬(온톨로지) · 비용 가정 · 비용 계산 근거)"""
             srow = t.loc[sid]
             sstage = srow['상태'].split(' (')[0]
-            with st.container(horizontal=True, vertical_alignment='center'):
-                st.subheader(nm(sid), icon=':material/precision_manufacturing:')
-                st.space('stretch')
-                st.button('설비 페이지 (신호·정비 이력)', icon=':material/open_in_new:', key='open_sid_page',
-                          on_click=open_sub, args=('설비 상세', sid), help='위험 확률·네 신호·정비 이력을 하위 페이지로 엽니다')
+            st.subheader(nm(sid), icon=':material/precision_manufacturing:')
             st.markdown(' '.join(x for x in [
                 f':{STAGE_DOT.get(sstage, "gray")}-badge[{sstage}]',
                 f':{ORDER_BADGE.get(order_state(sid), "gray")}-badge[작업 지시: {order_state(sid)}]',
@@ -1348,6 +1451,12 @@ else:
                             f'**{b["고장 확률"]:.0%}** (안전 기준 {cfg.safety_max:.0%})'
                             + (f'\n- 고장 난 뒤 고치는 것보다 **{manwon(costs.failure_loss - b["기대 총비용"])}** 적게 듭니다'
                                if costs.failure_loss > b['기대 총비용'] else ''))
+            # 설비 페이지 (신호 · 정비 이력): 하위 페이지로 넘어가지 않고 이 자리에서 펼쳐 본다 (2026-10-21).
+            #   그래프가 많아 펼칠 때만 그린다 (on_change='rerun' → 접혀 있으면 계산하지 않음)
+            eq_box = st.expander('설비 페이지 (신호 · 정비 이력)', icon=':material/monitoring:', key=f'eq_detail_{sid}', on_change='rerun')
+            if eq_box.open:
+                with eq_box:
+                    equipment_detail(sid, t, nested=True)
             # 근거 사슬 (온톨로지, 눌러야 펼쳐짐). 만들다 실패해도 이 칸만 알리고 나머지 화면은 그대로 둔다 (2026-10-21 배포 오류 재발 방지)
             with st.expander('근거: 경보 → 예측 → 신호 → 정비 결정 (온톨로지)', icon=':material/account_tree:'):
                 try:
@@ -1552,108 +1661,10 @@ if page == '설비 상세':
     sid = st.selectbox('설비 (지금 위험한 순서)', t.index.tolist(), key='sid',
                        format_func=lambda s: f'{nm(s)} ({s}) · {t.loc[s, "상태"]} · 24시간 내 고장 위험 {t.loc[s, "위험 확률"]:.0%}'
                        if pd.notna(t.loc[s, '위험 확률']) else f'{nm(s)} ({s}) · {t.loc[s, "상태"]}')
-    row = t.loc[sid]
     st.header(nm(sid), icon=ICONS['설비 상세'])
     st.caption(f'시나리오 {sid} · {st.session_state["split_label"]} · 지금 {clock(now)} 기준')
 
-    c1, c2, c3, c4 = st.columns(4, border=True)
-    c1.metric('상태', row['상태'].split(' (')[0], help=row['상태'])   # 칸이 좁아 영문 이름은 도움말로
-    c2.metric('24시간 내 고장 위험', '—' if pd.isna(row['위험 확률']) else f'{row["위험 확률"]:.0%}',
-              help=f'마지막 예측: {clock(row["마지막 예측 (h)"])}' if pd.notna(row['마지막 예측 (h)']) else None)
-    if CAUTION:
-        c3.metric('지금 열화 중일 확률', '—' if pd.isna(row['열화 확률']) else f'{row["열화 확률"]:.2f}')
-        c4.metric('첫 주의 / 첫 경보', ' / '.join(clock(row[k]) for k in ['첫 주의 (h)', '첫 경보 (h)']))
-    else:
-        c3.metric('첫 경보', clock(row['첫 경보 (h)']))
-
-    # 조치 안내는 설비관리자 근거·비용 화면으로 옮겼다 (2026-10-21, action_guide)
-    if row['상태'] == WARN and row['경보 유지']:
-        st.caption('지금 확률은 경보 기준보다 낮지만, 이번 운전 구간에서 이미 경보가 켜져 정비 전까지 경보로 유지합니다.')
-    last_p = after_last_maintenance(pts_now[pts_now['SCENARIO_ID'] == sid], 'T_H').tail(1)
-    if 'OOR_N' in last_p and len(last_p) and last_p['OOR_N'].iloc[0] > 0:
-        st.warning(f'마지막 예측({last_p["T_H"].iloc[0]:.0f}시간)의 특징 {int(last_p["OOR_N"].iloc[0])}개가 '
-                   f'학습 때 본 범위(0.1~99.9%) 밖입니다: {last_p["OOR_FEATS"].iloc[0]}. '
-                   '아주 심한 열화이거나 센서 이상일 수 있어, 모델 확률만 믿지 말고 현장에서 센서와 설비를 확인하세요.',
-                   title='입력 감시: 센서 확인', icon=':material/sensors:')
-
-    # 위험 확률 흐름
-    p = pts_now[pts_now['SCENARIO_ID'] == sid].rename(columns={'STAGE': '단계'})
-    p['단계'] = p['단계'].replace(LABEL)
-    x = alt.X('T_H:Q', title='시나리오 시작 후 경과 시간 (h)', scale=alt.Scale(domain=[0, 72], nice=False))
-    tip = [alt.Tooltip('T_H', title='시각(h)'), alt.Tooltip('PROB', title='24시간 안 고장 확률', format='.2f'), '단계']
-    if CAUTION:
-        tip.insert(2, alt.Tooltip('DEGRADED_PROB', title='열화 확률', format='.2f'))
-    line = alt.Chart(p).mark_line(color=LINE_BLUE).encode(x=x, y=alt.Y('PROB:Q', title='확률', scale=alt.Scale(domain=[0, 1])))
-    dots = alt.Chart(p).mark_circle(size=90).encode(x=x, y='PROB:Q', color=alt.Color('단계:N', scale=STAGE_COLORS), tooltip=tip)
-    layers = [*mnt_layer(sid, 1), line, dots,
-              alt.Chart(pd.DataFrame({'y': [TH]})).mark_rule(color=ALARM_RED, strokeDash=[6, 3]).encode(y='y:Q')]
-    if CAUTION:
-        layers += [alt.Chart(p).mark_line(color=CAUTION_YELLOW, strokeDash=[2, 2]).encode(x=x, y='DEGRADED_PROB:Q', tooltip=tip),
-                   alt.Chart(pd.DataFrame({'y': [CTH]})).mark_rule(color=CAUTION_YELLOW, strokeDash=[6, 3]).encode(y='y:Q')]
-    st.subheader('위험 확률과 열화 확률' if CAUTION else '위험 확률', icon=':material/trending_up:')
-    show_chart(alt.layer(*layers).properties(height=280), width='stretch')
-    st.caption(('파란 선과 점: 24시간 안 고장 확률(점 색 = 단계) · 노란 점선: 지금 열화 중일 확률 · '
-                f'빨간 가로 점선: 경보 기준 {TH:.2f} · 노란 가로 점선: 주의 기준 {CTH:.2f}' if CAUTION
-                else f'점선: 경보 기준 {TH:.2f}')
-               + ' · 회색 띠: 정비 · 빨간 실선: 고장'
-               + (' · 빨간 점선: 앞으로 일어날 실제 고장 (정답)' if show_truth else ''))
-
-    # 네 신호 흐름
-    h = hr_now[hr_now['SCENARIO_ID'] == sid].rename(columns=SIGNAL_NAMES)
-    long = h.melt(id_vars=['DONE_H'], value_vars=list(SIGNAL_NAMES.values()), var_name='신호', value_name='점수')
-    sig = alt.Chart(long).mark_line(opacity=0.8).encode(
-        x=alt.X('DONE_H:Q', title='시나리오 시작 후 경과 시간 (h)', scale=alt.Scale(domain=[0, 72], nice=False)),
-        y=alt.Y('점수:Q', title='표준화 점수 (1 = 정상 경계)'), color='신호:N',
-        tooltip=['신호', alt.Tooltip('DONE_H', title='시각(h)'), alt.Tooltip('점수', format='.2f')])
-    avg = alt.Chart(h).mark_line(color=INK, strokeWidth=2.5).encode(
-        x='DONE_H:Q', y='SCORE:Q', tooltip=[alt.Tooltip('SCORE', title='네 신호 평균', format='.2f')])
-    one = alt.Chart(pd.DataFrame({'y': [1]})).mark_rule(color=INK, strokeDash=[2, 2]).encode(y='y:Q')
-    st.subheader('네 신호의 흐름', icon=':material/ssid_chart:')
-    show_chart(alt.layer(*mnt_layer(sid, None), sig, avg, one).properties(height=300), width='stretch')
-    st.caption('회색 굵은 선: 네 신호 평균 점수 · 점선: 정상 범위 경계(1). 정비 후 재가동하면 처음 2시간은 기준을 잡는 시간이라 비어 있습니다.')
-
-    # 지금 신호 상태와 모델 기여도
-    left, right = st.columns(2)
-    with left:
-        st.subheader('지금 신호 상태', icon=':material/sensors:')
-        cur = after_last_maintenance(h.assign(HOUR_START=h['DONE_H'] - 1), 'HOUR_START')
-        last = cur.dropna(subset=list(SIGNAL_NAMES.values())).tail(1)
-        if row['상태'] == '정비 중':
-            st.write('정비 중이라 신호가 없습니다.')
-        elif last.empty:
-            st.write('재가동 뒤 아직 계산된 신호가 없습니다. 재가동 후 처음 2시간은 기준을 잡는 시간입니다. '
-                     '(정비 전 신호는 지금 상태가 아니라서 보여 주지 않습니다.)')
-        else:
-            bar = last.melt(value_vars=list(SIGNAL_NAMES.values()), var_name='신호', value_name='점수')
-            bar['정상 범위'] = np.where(bar['점수'] > 1, '벗어남', '안')
-            show_chart(
-                alt.layer(
-                    alt.Chart(bar).mark_bar().encode(
-                        y=alt.Y('신호:N', title=None, sort='-x'), x=alt.X('점수:Q', title='표준화 점수'),
-                        color=alt.Color('정상 범위:N', scale=alt.Scale(domain=['벗어남', '안'], range=[ALARM_RED, OK_GRAY]))),
-                    alt.Chart(pd.DataFrame({'x': [1]})).mark_rule(strokeDash=[2, 2]).encode(x='x:Q'),
-                ).properties(height=180), width='stretch')
-            st.caption(f'{last["DONE_H"].iloc[0]:.0f}시간까지의 1시간 값. 1을 넘으면 정상 시나리오의 95%보다 많이 벗어난 것입니다.')
-    with right:
-        with st.expander('자세히: 모델이 본 이유 (기여도)'):
-            cp = after_last_maintenance(pts_now[pts_now['SCENARIO_ID'] == sid], 'T_H')
-            if contrib is None:
-                st.write(f'최종 모델({bundle["final"]["model"]})은 특징별 기여도를 계산할 수 없는 종류입니다. '
-                         '왼쪽의 신호 상태와 위의 신호 흐름으로 경보 이유를 확인하세요.')
-            elif cp.empty:
-                st.write(f'아직 예측이 없습니다. 정비가 시작되면 정비 전 예측은 쓰지 않고, 재가동 뒤 다음 예측 시점({STEP}시간마다)을 기다립니다.')
-            else:
-                cr = contrib.loc[cp.index[-1]].rename('기여도').reset_index().rename(columns={'index': '묶음'})
-                show_chart(alt.Chart(cr).mark_bar().encode(
-                    y=alt.Y('묶음:N', title=None, sort='-x'), x=alt.X('기여도:Q', title=f'위험을 올린 정도 ({contrib_unit})'),
-                    color=alt.condition('datum.기여도 > 0', alt.value(ALARM_RED), alt.value(LINE_BLUE))
-                ).properties(height=220), width='stretch')
-                st.caption(f'{cp["T_H"].iloc[-1]:.0f}시간 예측 기준. 양수는 위험을 올린 쪽, 음수는 내린 쪽입니다. '
-                           + ('나무마다 결정 경로를 따라 확률이 바뀐 양을 그 분기에 쓰인 특징 묶음에 나눠 준 값으로, '
-                              '기준값에 모두 더하면 위의 위험 확률이 됩니다. ' if contrib_unit.startswith('확률')
-                              else '0은 학습 세트 평균 시점입니다. ')
-                           + '네 신호와 결합 점수는 서로 비슷한 정보라 모델 안에서 서로 상쇄될 수 있습니다. '
-                           '묶음 하나의 크기보다 왼쪽의 신호 상태를 먼저 보세요.')
+    equipment_detail(sid, t)
 
     with st.expander('근거 따라가기: 경보 → 예측 → 신호 → 정비 결정 (온톨로지)', icon=':material/account_tree:'):
         tr = ontology.trace(ontology_graph(assumptions(), t), sid, with_cost=(role == '정비 책임자'))

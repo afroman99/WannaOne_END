@@ -30,8 +30,9 @@ fastReruns = true
 #   공통 글꼴·크기·모서리는 여기에, 색은 [theme.light]·[theme.dark]에 따로 둔다.
 #   (CSS로 배경만 바꾸면 버튼·라디오 글자가 배경과 겹쳐 안 보이고, Streamlit 버전이 바뀌면 깨진다 → 테마 설정으로만)
 font = "'Noto Sans KR':https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap"
-baseFontSize = 17
-headingFontSizes = ["2rem", "1.6rem", "1.3rem"]
+# 글자 크기: 15~30년 근무한 현장 관리자도 편하게 읽도록 키움 (2026-10-21 사용자 요청, 17 → 19)
+baseFontSize = 19
+headingFontSizes = ["2.1rem", "1.7rem", "1.4rem"]
 headingFontWeights = [800, 700, 650]
 baseRadius = "0.75rem"
 buttonRadius = "0.6rem"

@@ -3,6 +3,7 @@
     python scripts/seed_demo.py --target local                 # 무엇을 지우고 넣을지 보여 주기만 (기본: 실제로 바꾸지 않음)
     python scripts/seed_demo.py --target local --apply         # 로컬(actions/ 아래 파일)에 적용
     python scripts/seed_demo.py --target shared --apply        # 공용 DB(Supabase, .streamlit/secrets.toml의 [db] url)에 적용
+    python scripts/seed_demo.py --target shared --empty --apply  # 작업 목업 없이 비우기만 (배정은 시연 중에 직접, 2026-10-21 시연 방식)
 
 기준: 테스트 세트 · 2일차 02:00 (재생 시각 26h). 시연 설정도 이 값으로 맞춘다.
 인원 부재는 넣지 않는다(전원 출근). 라이브 데모 때 '인원 현황'에서 바꾼다.
@@ -141,18 +142,25 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--target', choices=['local', 'shared'], required=True)
     ap.add_argument('--apply', action='store_true', help='실제로 지우고 넣는다 (없으면 보여 주기만)')
+    ap.add_argument('--empty', action='store_true', help='작업 목업을 넣지 않고 비우기만 (시연 시각만 맞춘다)')
     a = ap.parse_args()
     make_store, make_log, wipe, counts = stores(a.target)
     before = counts()
     print(f'[{a.target}] 지금 기록: 작업 {before["tasks"]}건 · 진행 기록 {before["action_log"]}건 · 부재 {before["absences"]}건')
-    print(f'  → 모두 지우고 목업을 넣습니다: 작업 {len(JOBS)}건 (완료 3 · 진행 중 2 · 대기 2 · 지연 1 · 중단 1), '
+    print('  → 모두 지우고 비워 둡니다 (작업·진행 기록·부재 없음), 시연 시각 테스트 세트 · 2일차 02:00' if a.empty else
+          f'  → 모두 지우고 목업을 넣습니다: 작업 {len(JOBS)}건 (완료 3 · 진행 중 2 · 대기 2 · 지연 1 · 중단 1), '
           f'따로 남는 진행 기록 {len(EXTRA)}건, 부재 없음, 시연 시각 테스트 세트 · 2일차 02:00')
     if not a.apply:
         print('  (보여 주기만 했습니다. 적용하려면 --apply)')
         return
     wipe()
-    store, log = make_store(), make_log()
-    seed(store, log)
+    store = make_store()
+    if a.empty:
+        store.set_setting('split', SPLIT)
+        store.set_setting('now', str(NOW))
+        store.save_absences([])
+    else:
+        seed(store, make_log())
     after = counts()
     print(f'  적용했습니다: 작업 {after["tasks"]}건 · 진행 기록 {after["action_log"]}건 · 부재 {after["absences"]}건')
 

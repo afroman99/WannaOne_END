@@ -407,6 +407,11 @@ if LOCKED_WORKER:
     st.session_state.pop('msub', None)
     st.session_state['my_team'] = USER['team']
     role = WORKER
+elif USER is not None and USER['role'] == 'manager':
+    # 구글 로그인한 설비관리자는 설비관리자 화면만 (2026-10-21 8차): 작업자 화면의 체크·시작·완료는 실제 작업자만 하게.
+    #   기록의 '현장 작업'이 실제 작업자가 한 일만 남는다. 로그인 없는 화면(로컬)은 두 역할을 그대로 고를 수 있다
+    st.session_state['role'] = MANAGER
+    role = MANAGER
 else:
     role = st.segmented_control('보는 사람', [MANAGER, WORKER], key='role', required=True, label_visibility='collapsed',
                                 on_change=close_sub, format_func=lambda r: f'{ICONS[r]} {ROLE_LABEL[r]}')

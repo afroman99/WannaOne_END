@@ -306,8 +306,8 @@ def _rows(g, q, sid):
     return [{k: _py(r[k]) for k in r.labels} for r in g.query(q, initBindings={'e': CC[f'eq_{_sid(sid)}']})]
 
 
-def trace(g, sid, with_cost=True):
-    """설비 하나의 근거 사슬: [(단계, 내용)]. with_cost=False면 비용 숫자를 뺀다 (현장 작업 화면)"""
+def trace(g, sid, with_cost=True, unit=''):
+    """설비 하나의 근거 사슬: [(단계, 내용)]. with_cost=False면 비용 숫자를 뺀다 (현장 작업 화면). unit: 비용 뒤에 붙일 단위"""
     out = []
     al = _rows(g, Q_ALARM, sid)
     pred = _rows(g, Q_PRED, sid)
@@ -347,7 +347,7 @@ def trace(g, sid, with_cost=True):
                      f'완료 전 고장 확률 {d["p"]:.2f}' if d['p'] is not None else None,
                      '안전 기준 충족' if d['safe'] else '안전 기준 초과']
             if with_cost and d['cost'] is not None:
-                parts.append(f'기대 총비용 {d["cost"]:,.0f}')
+                parts.append(f'기대 총비용 {d["cost"]:,.0f}{unit}')
             if d['plan_h'] is not None:
                 parts.append(f'정기 교체 계획 {d["plan_h"]:.0f}h' + (f' ({d["plan_part"]})' if d['plan_part'] else ''))
             out.append(('정비 결정', head + ' · ' + ' · '.join(x for x in parts if x)))

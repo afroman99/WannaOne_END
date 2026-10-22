@@ -283,7 +283,9 @@ streamlit run app/dashboard.py          # 브라우저에서 http://localhost:85
   - 로그인하면 역할이 고정된다: 설비관리자 계정은 설비관리자 화면만(작업자 화면 버튼 없음), 작업자 계정은 자기 팀 작업자 화면만. 그래서 진행 기록의 '현장 작업'은 실제 작업자가 한 일만 남는다. 로그인 없는 화면(로컬)은 두 역할을 다 고를 수 있다
   - 공용 DB 시험: `TEST_PG_URL=postgresql://… python tests/check_regression.py`
 - 패키지 취약점: pip-audit 0건(tornado 6.5.9로 고정, rdflib 7.6.0 추가 후 다시 확인). 오류 상세 숨김·사용 통계 끔(`.streamlit/config.toml`). 회귀 점검 9절에 보안 항목.
-- 배포: 팀 저장소를 Fork → Streamlit Community Cloud → Fork의 `main` 브랜치, 실행 파일 `app/dashboard.py` → Deploy → Settings의 Secrets에 위 값을 넣는다. 팀 저장소의 변경은 Fork에서 Sync fork를 눌러야 반영된다. 모델을 바꾸면 `05_predict_test.py` → `python -m src.app_data`를 다시 실행해 `app_data/`를 커밋한다.
+- 배포 (2026-10-22 변경): **https://cast-pdm.onrender.com** — 같은 계산을 쓰는 React + FastAPI 화면(`web/`, `api/`)을 Fork(afroman99/WannaOne_END)의 `react` 가지에서 Render 무료 웹 서비스(Docker, Virginia)로 올렸다. 위 Secrets 내용 전체를 Render 환경 변수 `CAST_SECRETS`에 넣고, 구글 OAuth 리디렉션 URI는 `https://cast-pdm.onrender.com/api/auth/callback`이다(`[auth] redirect_uri`는 Streamlit용이라 이 서버는 쓰지 않는다). 설정 순서와 주의할 점은 `docs/react-migration.md`의 '배포'.
+  - 처음 배포(2026-10-16~10-22)는 Streamlit Community Cloud → Fork의 `main` 브랜치, 실행 파일 `app/dashboard.py`였고 10-22에 지웠다. 노트북에서 Streamlit 화면은 지금도 `streamlit run app/dashboard.py`로 켤 수 있다.
+  - 팀 저장소의 변경은 Fork에서 Sync fork를 눌러야 반영된다. 모델을 바꾸면 `05_predict_test.py` → `python -m src.app_data`를 다시 실행해 `app_data/`를 커밋한다.
 
 ## 팀원과 역할
 

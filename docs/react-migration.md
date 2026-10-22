@@ -24,10 +24,21 @@ cd web && npm install && npm run build && cd ..                                 
 Hugging Face Spaces는 2026-10 기준 Docker가 유료(PRO)라 Render를 쓴다. 저장소 맨 위 `Dockerfile`이 화면을 빌드하고 서버를 켠다
 (원자료·모델·기록·비밀값은 `.dockerignore`와 `.gitignore`로 빠진다. 화면은 `app_data/`만 읽는다). 서버 최대 메모리는 약 263MB로 무료 512MB 안이다.
 
-1. Render → New → **Web Service** → 깃허브 저장소와 가지 고르기 → Language **Docker**, Instance Type **Free**.
-2. Environment → 변수 `CAST_SECRETS`, 값 = `.streamlit/secrets.toml` 내용 전체.
-3. 배포가 끝나면 주소(`https://<이름>.onrender.com`)를 구글 클라우드 콘솔에 `https://<이름>.onrender.com/api/auth/callback`으로 더한다.
-4. 무료는 15분 동안 접속이 없으면 잠들고, 다음 접속 때 약 1분 걸려 깬다 (발표 전에 한 번 열어 둘 것).
+**배포 주소: https://cast-pdm.onrender.com** (2026-10-22, 포크 afroman99/WannaOne_END의 `react` 가지, Virginia, Free).
+설비관리자·작업자 계정 로그인과 공용 DB 저장을 이 주소에서 확인했다. Streamlit Cloud 앱(`cast-pdm.streamlit.app`)은 같은 날 지웠다.
+
+1. Render → New → **Web Service** → 깃허브 저장소, Branch **react**.
+2. Language **Docker** (기본값 Python 3이면 Build/Start Command를 물어본다). Root Directory는 **비움**, Dockerfile Path `./Dockerfile`.
+3. Region **Virginia (US East)**: 공용 DB(Supabase)가 us-east-1이라 같은 지역에 둔다. Singapore에 두었을 때는 로그인 뒤 요청마다 DB 왕복이 길어 느렸다. 지역은 만든 뒤 바꿀 수 없어 서비스를 새로 만들어야 한다.
+4. Instance Type **Free** ($0, 0.1 CPU, 512MB). 아래 막대가 `$0 / month`인지 확인.
+5. Environment Variables → KEY `CAST_SECRETS`(**밑줄**. `CAST-SECRETS`처럼 하이픈이면 못 읽고 로그인 없이 뜬다), VALUE = `.streamlit/secrets.toml` 내용 전체(`pbcopy < .streamlit/secrets.toml` 뒤 붙여넣기). Secret Files로 올리면 `/etc/secrets/`에 들어가 서버가 찾지 못한다.
+6. 배포가 끝나면 구글 클라우드 콘솔 OAuth 클라이언트의 승인된 리디렉션 URI에 `https://<이름>.onrender.com/api/auth/callback`을 더한다. 서버는 `secrets.toml`의 `redirect_uri`(Streamlit용)를 쓰지 않고 접속한 주소로 만든다.
+7. 확인: `https://<이름>.onrender.com/api/session`이 `"loginEnabled": true`면 비밀값이 들어간 것이다.
+
+- 무료는 15분 동안 접속이 없으면 잠들고, 다음 접속 때 약 1분 걸려 깬다 (발표 전에 한 번 열어 둘 것).
+- 무료 CPU(0.1개)라 첫 계산이 노트북보다 느리다(설비 목록 계산 약 2초, 로컬 0.06초).
+- 로그인 뒤 `mismatching_state` 오류(`Internal Server Error`)가 나면, 로그인을 시작한 창이 아닌 곳에서 돌아온 주소를 열었거나 남은 쿠키 탓이다 → 시크릿 창에서 배포 주소를 새로 열고 로그인한다. 같은 콜백 주소를 나중에 다시 열면 `invalid_grant`(일회용 코드 만료)가 난다.
+- 로그에 나오는 `AuthlibDeprecationWarning`(httpx)과 Vite의 `chunkSizeWarningLimit` 경고는 동작과 상관없다.
 
 화면을 고치면서 볼 때는 위 서버를 켠 채로 `cd web && npm run dev` → http://localhost:5173 (/api는 8000번으로 넘김).
 같은 Wi-Fi의 폰에서 보려면 `--host 0.0.0.0`으로 켜고 `http://<노트북 IP>:8000`.
@@ -68,10 +79,8 @@ Hugging Face Spaces는 2026-10 기준 Docker가 유료(PRO)라 Render를 쓴다.
 
 ## 검증하지 못한 것 / 제한
 
-- **구글 로그인·공용 DB**: 코드는 옮겼지만 시험하지 못했다.
-  - 사본의 `.streamlit/secrets.toml` 11번째 줄(`[users]`)에 따옴표가 맞지 않아 파일을 읽을 수 없다 → 지금은 로그인 없이 로컬 저장소로만 돈다. 원본 폴더의 같은 파일도 확인 필요.
-  - 고친 뒤에도 구글 클라우드 콘솔의 OAuth 클라이언트에 `http://localhost:8000/api/auth/callback`(배포하면 그 주소)을 승인된 리디렉션 URI로 더해야 한다.
-- **클라우드 배포**: 하지 않았다. Streamlit Community Cloud는 FastAPI+React를 올릴 수 없어 Render·Fly.io 같은 곳이 필요하다.
+- **구글 로그인·공용 DB**: `.streamlit/secrets.toml` 11번째 줄 따옴표 오류를 고친 뒤 로컬(`http://localhost:8000`, 리디렉션 URI `http://localhost:8000/api/auth/callback`)에서 설비관리자 계정, 배포 주소에서 설비관리자·작업자 계정 로그인을 확인했다(2026-10-22).
+- **클라우드 배포**: Streamlit Community Cloud는 FastAPI+React를 올릴 수 없어 Render에 올렸다(위 '배포').
 - 원본과 같은 시각·같은 기록에서 숫자를 화면끼리 하나하나 맞대어 보지는 않았다(계산 코드는 줄 단위로 옮김).
 - 첫 요청 때 예측을 계산해서 10초쯤 걸린다.
 - 빌드 경고: JS 묶음 약 1MB(차트·graphviz), Pretendard 전체 글꼴 2MB.

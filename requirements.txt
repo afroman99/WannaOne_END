@@ -7,12 +7,10 @@ pyarrow==25.0.1
 scikit-learn==1.9.0
 joblib==1.5.3
 matplotlib==3.11.1
-streamlit==1.65.0     # 대시보드만
-altair==6.3.0         # 대시보드만
-tornado==6.5.9        # 대시보드 웹 서버(Streamlit이 씀). 6.5.7에 알려진 취약점 6건(pip-audit, 2026-10-15) → 수정 버전 고정
 rdflib==7.6.0         # 온톨로지 (OWL/RDF, SPARQL). BSD 라이선스
-# 2차 (2026-10-16): 공용 DB(Supabase Postgres)와 구글 로그인(st.login). 로컬 SQLite만 쓰면 없어도 된다
+# 2차 (2026-10-16): 공용 DB(Supabase Postgres)와 구글 로그인. 로컬 SQLite만 쓰면 없어도 된다
+# 화면(React)과 API 서버 패키지는 api/requirements.txt (Streamlit 화면은 2026-10-22 지움)
 psycopg[binary]==3.3.6     # Postgres 접속 (LGPL, 라이브러리로만 사용)
 psycopg-pool==3.3.3        # 연결 풀
-Authlib==1.9.1             # st.login(OpenID Connect)에 필요
+Authlib==1.9.1             # 구글 로그인(OpenID Connect, api/server.py)
 httpx==0.28.1               # Authlib가 구글과 통신할 때 씀 (없으면 로그인 버튼이 서버 오류)

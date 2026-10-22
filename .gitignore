@@ -205,7 +205,7 @@ models/
 .agents/
 .claude/
 
-# 대시보드 비밀값 (비밀번호 해시 등). 클라우드에서는 앱 설정의 Secrets에 넣는다
+# 대시보드 비밀값 (구글 로그인·공용 DB·계정). 배포(Render)에서는 환경 변수 CAST_SECRETS에 같은 내용을 넣는다
 .streamlit/secrets.toml
 
 # 클라우드용 대시보드 데이터 app_data/ (src/app_data.py가 만든다)는 커밋한다. 위의 *.parquet 규칙에서 이 폴더만 뺀다

@@ -1,8 +1,8 @@
-"""CAST-PdM API (React 화면용, 2026-10-22). Streamlit 화면(app/dashboard.py)과 같은 계산(api/engine.py → src/)을 JSON으로 내준다.
+"""CAST-PdM API (React 화면용, 2026-10-22). 계산(api/engine.py → src/)을 JSON으로 내준다. 처음 Streamlit 화면(app/dashboard.py, 2026-10-22 지움)과 같은 규칙이다.
 
     .venv/bin/uvicorn api.server:app --port 8000      # 프로젝트 폴더에서. web/dist가 있으면 화면도 같이 → http://localhost:8000
 
-저장소 (dashboard.py와 같은 규칙)
+저장소 (옛 dashboard.py와 같은 규칙)
   공용 DB    구글 로그인한 사람 + Secrets [db] url (Supabase Postgres). 노트북·폰이 같은 작업을 본다
   로컬       actions/tasks.sqlite3 · actions/action_log.csv (커밋하지 않음). 로그인을 켜지 않았을 때
 재생 시각: 데이터 세트·적용한 시각·적용한 실제 시각(clock_at)을 저장소 settings에 두고, 흐르는 시각은 요청마다 계산한다 → 모든 화면이 같은 값.

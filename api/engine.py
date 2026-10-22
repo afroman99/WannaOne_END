@@ -1,4 +1,4 @@
-"""CAST-PdM 계산 (React 화면용, 2026-10-22). app/dashboard.py의 계산 부분을 Streamlit 없이 옮겼다.
+"""CAST-PdM 계산 (React 화면용, 2026-10-22). app/dashboard.py의 계산 부분을 Streamlit 없이 옮겼다(dashboard.py는 2026-10-22 지움, git 기록에 남음).
 
     eng = Engine()                                   # 모델·데이터를 한 번 읽고 기억한다
     c = eng.ctx(split, now_f, tasks_store, action_log, assume, truth)   # 지금 시각 하나의 계산 묶음
@@ -6,7 +6,7 @@
 
 대시보드와 같은 규칙: 경보 유지 · 정비 중 · 정비 후 예측 대기 · 재고(고장 복구·완료 보고·발주 도착) ·
 정비팀 하루 한도(출근 인원 × 8시간 ÷ 16인·시) · 즉시 정비 / 다음 정기 교체 / 사후정비 같은 기준 비교 · 온톨로지 근거 사슬.
-화면 문장은 dashboard.py 그대로 두고, 화면에서 쓰는 마크다운 강조(**…**)만 뺐다.
+화면 문장은 옛 dashboard.py 그대로 두고, 화면에서 쓰는 마크다운 강조(**…**)만 뺐다.
 """
 import json
 import re
@@ -41,7 +41,7 @@ SHIFT = (9, 17)                            # 정규 근무 9시~17시
 OVERTIME = 1.5                             # 정규 근무 밖 인건비 배율
 PLAN_GUESS_H = 12                          # 정기 교체 계획이 없을 때 비교에만 쓰는 '계획 정비' 시점
 
-# 작업 상세 체크리스트 (dashboard.py와 같다)
+# 작업 상세 체크리스트 (옛 dashboard.py와 같다)
 TBM_ITEMS = [('tbm_share', '작업 내용 · 위험 요인 · 역할 분담 공유'), ('tbm_ils', 'ILS 절차 준수 여부 확인'), ('tbm_press', '잔압 제거'),
              ('tbm_power', '전원 차단'), ('tbm_valve', '밸브 차단'), ('tbm_ppe', '보호구 착용 확인')]
 PRE_KEYS = ['permit', 'halt', *[k for k, _ in TBM_ITEMS], 'tbm_done', 'parts']
@@ -209,7 +209,7 @@ class Engine:
 
 
 class Ctx:
-    """지금 시각 하나의 계산 (요청마다 새로 만든다. 값은 dashboard.py의 한 번 그리기와 같다)"""
+    """지금 시각 하나의 계산 (요청마다 새로 만든다. 값은 옛 dashboard.py의 한 번 그리기와 같다)"""
 
     def __init__(self, eng, split, now_f, store, log, assume, truth):
         self.eng, self.split, self.store, self.log = eng, split, store, log

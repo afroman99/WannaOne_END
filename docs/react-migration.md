@@ -1,6 +1,6 @@
 # React + FastAPI 전환 (2026-10-22)
 
-Streamlit 화면(`app/dashboard.py`)은 그대로 두고, 같은 계산을 쓰는 새 화면을 옆에 만들었다.
+Streamlit 화면(`app/dashboard.py`)과 같은 계산을 쓰는 새 화면을 옆에 만들었다. 옮긴 뒤 Streamlit 화면·설정(`app/`, `.streamlit/config.toml`, `deploy.toml`, 접속 비밀번호)과 패키지(streamlit·altair·tornado)는 지웠다(2026-10-22, git 기록에 남음). 아래 표의 '원본'은 지운 Streamlit 화면이다.
 
 ```
 web/ (React + Tailwind v4 + shadcn + COMPASS)  ──/api──▶  api/server.py (FastAPI)  ──▶  api/engine.py ──▶ src/ · models/

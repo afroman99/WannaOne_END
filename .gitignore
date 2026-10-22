@@ -16,6 +16,8 @@ eggs/
 .eggs/
 lib/
 lib64/
+# React 화면의 web/src/lib (API 호출·공통 코드)는 Python 빌드 산출물이 아니다 (2026-10-22)
+!web/src/lib/
 parts/
 sdist/
 var/

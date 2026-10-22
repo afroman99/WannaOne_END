@@ -1,0 +1,16 @@
+# 배포 이미지에 넣지 않는 것 (Dockerfile은 필요한 폴더만 COPY하지만, 빌드할 때 서버로 보내는 양도 줄인다)
+.git
+.venv
+.streamlit
+data
+models
+actions
+figures
+reports
+predictions
+analysis
+build
+*.ipynb
+web/node_modules
+web/dist
+**/__pycache__

@@ -1,0 +1,14 @@
+# 배포 서버에 필요한 것만 (Streamlit·그래프 패키지 없음). 버전은 루트 requirements.txt·api/requirements.txt와 같다
+pandas==3.0.5
+numpy==2.5.1
+pyarrow==25.0.1
+scikit-learn==1.9.0
+joblib==1.5.3
+rdflib==7.6.0
+psycopg[binary]==3.3.6
+psycopg-pool==3.3.3
+Authlib==1.9.1
+httpx==0.28.1
+fastapi==0.120.4
+uvicorn==0.38.0
+itsdangerous==2.2.0

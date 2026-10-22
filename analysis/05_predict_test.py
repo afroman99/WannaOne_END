@@ -11,7 +11,7 @@
 
 결과 (둘 다 저장소에는 올리지 않음)
   predictions/test_risk24.csv    테스트 세트 예측
-  models/risk24.joblib           학습한 모델·임계값·보정값·검증 세트 결과 (대시보드 app/dashboard.py가 불러온다)
+  models/risk24.joblib           학습한 모델·임계값·보정값·검증 세트 결과 (대시보드 api/engine.py가 불러온다)
 
 predictions/test_risk24.csv 열
   SCENARIO_ID, OBSERVED_AT, T_H  예측 시점

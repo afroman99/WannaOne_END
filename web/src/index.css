@@ -1,0 +1,192 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "pretendard/dist/web/variable/pretendardvariable.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --font-heading: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --color-sidebar-ring: var(--sidebar-ring);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar: var(--sidebar);
+    --color-chart-5: var(--chart-5);
+    --color-chart-4: var(--chart-4);
+    --color-chart-3: var(--chart-3);
+    --color-chart-2: var(--chart-2);
+    --color-chart-1: var(--chart-1);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --radius-sm: calc(var(--radius) * 0.15);
+    --radius-md: calc(var(--radius) * 0.2);
+    --radius-lg: calc(var(--radius) * 0.25);
+    --radius-xl: calc(var(--radius) * 0.35);
+    --radius-2xl: calc(var(--radius) * 0.45);
+    --radius-3xl: calc(var(--radius) * 0.55);
+    --radius-4xl: calc(var(--radius) * 0.65);
+    --shadow-sm: var(--surface-shadow-sm);
+    --shadow-md: var(--surface-shadow-md);
+    --shadow-lg: var(--surface-shadow-lg);
+    --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --color-primary-hover: var(--primary-hover);
+    --color-gallery-background: var(--gallery-background);
+    --radius-5xl: calc(var(--radius) * 0.8);
+    --radius-6xl: var(--radius);
+    --radius-container: min(var(--radius), max(0px, calc(var(--nested-radius, var(--radius)) + var(--nested-gap, 0px))));
+    --primary-hover: var(--primary-hover);
+    --color-gallery-preview-background: var(--gallery-preview-background);
+    --surface-shadow-lg: var(--surface-shadow-lg);
+    --surface-shadow-md: var(--surface-shadow-md);
+    --surface-shadow-sm: var(--surface-shadow-sm);
+    --corner-shape: var(--corner-shape);
+}
+
+:root {
+    --background: #ffffff;
+    --foreground: oklch(0.145 0 0);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.145 0 0);
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.145 0 0);
+    --primary: #007AFF;
+    --primary-foreground: #ffffff;
+    --secondary: oklch(0.97 0 0);
+    --secondary-foreground: oklch(0.205 0 0);
+    --muted: oklch(0.97 0 0);
+    --muted-foreground: oklch(0.556 0 0);
+    --accent: #007AFF;
+    --accent-foreground: #ffffff;
+    --destructive: oklch(0.577 0.245 27.325);
+    --border: oklch(0.922 0 0);
+    --input: oklch(0.922 0 0);
+    --ring: oklch(0.708 0 0);
+    --chart-1: oklch(0.87 0 0);
+    --chart-2: oklch(0.556 0 0);
+    --chart-3: oklch(0.439 0 0);
+    --chart-4: oklch(0.371 0 0);
+    --chart-5: oklch(0.269 0 0);
+    /* 프로젝트 조정 (2026-10-22): COMPASS 기본 2.5rem(40px)은 이 화면에 너무 둥글어 절반으로. 버튼 11px · 입력 7px · 카드 20px */
+    --radius: 1.25rem;
+    --sidebar: oklch(0.985 0 0);
+    --sidebar-foreground: oklch(0.145 0 0);
+    --sidebar-primary: oklch(0.205 0 0);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.97 0 0);
+    --sidebar-accent-foreground: oklch(0.205 0 0);
+    --sidebar-border: oklch(0.922 0 0);
+    --sidebar-ring: oklch(0.708 0 0);
+    --corner-shape: squircle;
+    --surface-shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 10%), 0 1px 2px -1px rgb(0 0 0 / 10%);
+    --surface-shadow-md: 0 4px 6px -1px rgb(0 0 0 / 10%), 0 2px 4px -2px rgb(0 0 0 / 10%);
+    --surface-shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 10%), 0 4px 6px -4px rgb(0 0 0 / 10%);
+    --gallery-background: #f7f7f7;
+    --gallery-preview-background: oklch(1 0 0);
+    --primary-hover: color-mix(in oklch, var(--primary), black 12%);
+}
+
+.dark {
+    --background: oklch(0.15 0 0);
+    --foreground: oklch(0.985 0 0);
+    --card: oklch(0.205 0 0);
+    --card-foreground: oklch(0.985 0 0);
+    --popover: oklch(0.205 0 0);
+    --popover-foreground: oklch(0.985 0 0);
+    --primary: #007AFF;
+    --primary-foreground: #ffffff;
+    --secondary: oklch(0.269 0 0);
+    --secondary-foreground: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.708 0 0);
+    --accent: #007AFF;
+    --accent-foreground: #ffffff;
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 15%);
+    --ring: oklch(0.556 0 0);
+    --chart-1: oklch(0.87 0 0);
+    --chart-2: oklch(0.556 0 0);
+    --chart-3: oklch(0.439 0 0);
+    --chart-4: oklch(0.371 0 0);
+    --chart-5: oklch(0.269 0 0);
+    --sidebar: oklch(0.205 0 0);
+    --sidebar-foreground: oklch(0.985 0 0);
+    --sidebar-primary: oklch(0.488 0.243 264.376);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.269 0 0);
+    --sidebar-accent-foreground: oklch(0.985 0 0);
+    --sidebar-border: oklch(1 0 0 / 10%);
+    --sidebar-ring: oklch(0.556 0 0);
+    --surface-shadow-sm: 0 2px 6px 0 rgb(0 0 0 / 40%), 0 1px 2px 0 rgb(0 0 0 / 25%);
+    --surface-shadow-md: 0 6px 16px -2px rgb(0 0 0 / 50%), 0 2px 6px 0 rgb(0 0 0 / 35%);
+    --surface-shadow-lg: 0 14px 32px -4px rgb(0 0 0 / 65%), 0 6px 12px -2px rgb(0 0 0 / 45%);
+    --gallery-background: oklch(0.15 0 0);
+    --gallery-preview-background: oklch(0.18 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+  body {
+    @apply bg-background text-foreground;
+    }
+  html {
+    @apply font-sans;
+    }
+  button:not(:disabled), [role="button"]:not(:disabled) {
+    cursor: pointer;
+    }
+
+@supports (corner-shape: squircle) {
+  * {
+    corner-shape: var(--corner-shape);
+        }
+  ::before, ::after {
+    corner-shape: inherit;
+        }
+  :where(.rounded-full, [data-slot="badge"],
+           [data-slot^="avatar"], [data-slot="slider-thumb"],
+           [data-slot="slider-track"], [data-slot="progress"],
+           [data-corner="round"]) {
+    corner-shape: round;
+        }
+    }
+}
+
+/* CAST-PdM 상태색: COMPASS에 없는 주의(노랑)·정상(초록). 경보는 COMPASS --destructive를 쓴다 */
+:root {
+    --warning: oklch(0.666 0.179 58.318);
+    --success: oklch(0.596 0.145 163.225);
+}
+
+.dark {
+    --warning: oklch(0.828 0.189 84.429);
+    --success: oklch(0.765 0.177 163.223);
+}
+
+@theme inline {
+    --color-warning: var(--warning);
+    --color-success: var(--success);
+}

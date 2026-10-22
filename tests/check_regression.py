@@ -6,15 +6,15 @@
 점검 항목 (하나라도 실패하면 종료 코드 1)
   1. 모델 파일: 해시·필수 값·만든 환경(meta)이 맞는가
   2. 대표 숫자: 예측 간격 1시간, 경보 기준 0.56, 주의 기준 0.57, 검증 세트 AP 0.866, 고장 감지 14/16, 비용(두 부품) 1020
-  3. 서비스 예측: 대시보드 경로(serving.score_scenarios)의 테스트 세트 예측이 predictions/test_risk24.csv와 같은가
+  3. 서비스 예측: 화면 경로(serving.score_scenarios)의 테스트 세트 예측이 predictions/test_risk24.csv와 같은가
      (테스트 5,028개 시점 중 경보 554개, 경보 시나리오 18개)
   4. 경보 이유: 랜덤포레스트 기여도의 기준값 + 합이 위험 확률과 같은가
-  5. 비용 곡선: 대시보드 비용 계산기가 평가 함수(src/evaluate.py)와 같은 비용을 내는가 (손익분기 0.60)
+  5. 비용 곡선: 화면 비용 계산기가 평가 함수(src/evaluate.py)와 같은 비용을 내는가 (손익분기 0.60)
   6. 안전장치: 모르는 정비 유형, 빠진 특징, 바뀐 모델 파일을 조용히 넘기지 않고 멈추는가
   7. 1시간 정답: make_targets_hourly가 6시간 시점에서 정답 파일 기준(make_targets)과 같은가
   8. 의사결정 지원(DSS): 모델 파일의 정책 비용(검증 세트 ① 1056 ② 998 ③ 918, 부품 재고 가정 포함)과, 정기 교체 직전이면 기다리고 준비가 안 되면 지금 교체하는가
   9. 보안: 클라우드용 데이터(app_data)가 서비스 예측과 같고 원자료·모델 객체가 없는가, 바뀐 파일을 막는가,
-     비밀번호 확인이 맞는가, 입력 감시 범위가 모델 파일에 있는가
+     입력 감시 범위가 모델 파일에 있는가
 
 숫자를 일부러 바꾼 경우(모델 개선 등)에는 보고서를 고친 뒤 EXPECTED도 함께 고친다.
 """
@@ -186,11 +186,8 @@ print('\n9. 보안')
 import json
 import tempfile as _tf
 from src import app_data
-from src.auth import hash_password, verify
 check('입력 감시 범위가 모델 파일에 있다', 'feature_range' in bundle and len(bundle['feature_range']['lo']) == len(bundle['features']))
 check('서비스 예측에 입력 감시 열이 있다', {'OOR_N', 'OOR_FEATS'} <= set(pts.columns))
-salt, dig, it = hash_password('test-only-password', iterations=1000)
-check('비밀번호 확인: 맞으면 통과, 틀리면 거부', verify('test-only-password', salt, dig, it) and not verify('wrong', salt, dig, it))
 with _tf.TemporaryDirectory() as d:
     app_data.export(d)
     meta, data = app_data.load(d)
@@ -206,12 +203,6 @@ with _tf.TemporaryDirectory() as d:
     with open(Path(d) / 'test_pts.parquet', 'ab') as f:
         f.write(b'0')
     check('바뀐 클라우드용 파일은 불러오지 않는다', raises(lambda: app_data.load(d), ValueError))
-from src.auth import public_by_decision
-with _tf.TemporaryDirectory() as d:
-    f = Path(d) / 'deploy.toml'
-    check('공개 결정은 deploy.toml에 명시했을 때만 (없거나 false면 비공개)', not public_by_decision(f)
-          and (f.write_text('[access]\npublic = false\n') or True) and not public_by_decision(f)
-          and (f.write_text('[access]\npublic = true\n') or True) and public_by_decision(f))
 from src.posko_data import _check_manifest
 check('manifest의 경로 조작 값(../)을 막는다',
       raises(lambda: _check_manifest({'files': [{'id': '../x', 'scenarioId': 'S0001', 'chunks': []}], 'scenarios': []}), ValueError)

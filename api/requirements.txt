@@ -1,0 +1,5 @@
+# React 화면용 API 서버 (api/server.py, 2026-10-22). 분석·모델 패키지는 루트 requirements.txt를 그대로 쓴다
+#   python3 -m venv --system-site-packages .venv && .venv/bin/pip install -r api/requirements.txt
+fastapi==0.120.4
+uvicorn==0.38.0
+itsdangerous==2.2.0      # 로그인 세션 쿠키 서명 (Starlette SessionMiddleware). 구글 로그인은 루트 requirements의 Authlib·httpx

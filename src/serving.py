@@ -1,7 +1,7 @@
 """조기경보 서비스용 함수: 저장한 모델로 예측하고, 경보 이유를 계산한다.
 
 analysis/05_predict_test.py가 학습한 모델을 models/risk24.joblib에 저장하고,
-대시보드(app/dashboard.py)는 저장된 모델을 불러와 예측만 한다(다시 학습하지 않는다).
+대시보드(api/engine.py → React 화면)는 저장된 모델을 불러와 예측만 한다(다시 학습하지 않는다).
 
     from src.serving import load_bundle, score_scenarios, explain
 

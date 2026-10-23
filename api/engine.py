@@ -174,7 +174,7 @@ class Engine:
     def names(self, split):
         ids = sorted(self.data(split)[0]['SCENARIO_ID'].unique())
         names = {s: f'{LINE_NO[split]}연주 #{i:02d}' for i, s in enumerate(ids, 1)}
-        f = ROOT / 'app' / 'equipment_names.csv'
+        f = ROOT / 'data' / 'equipment_names.csv'
         if f.exists():
             m = pd.read_csv(f, dtype=str).dropna()
             names.update({s: n.strip()[:30] for s, n in zip(m['SCENARIO_ID'], m['NAME']) if s in names and n.strip()})

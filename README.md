@@ -292,7 +292,7 @@ cd web && npm install && npm run build && cd ..                     # 화면 빌
   - 로그인하면 역할이 고정된다: 설비관리자 계정은 설비관리자 화면만(작업자 화면 버튼 없음), 작업자 계정은 자기 팀 작업자 화면만. 그래서 진행 기록의 '현장 작업'은 실제 작업자가 한 일만 남는다. 로그인을 설정하지 않은 로컬 화면은 두 역할을 다 고를 수 있다
   - 공용 DB 시험: `TEST_PG_URL=postgresql://… python tests/check_regression.py`
 - 패키지 취약점: pip-audit 0건(2026-10-15, rdflib 7.6.0 추가 후 다시 확인. 그때 고정한 tornado는 Streamlit과 함께 뺐다). 회귀 점검 9절에 보안 항목.
-- 배포 (2026-10-22 변경): **https://cast-pdm.onrender.com** — 같은 계산을 쓰는 React + FastAPI 화면(`web/`, `api/`)을 Fork(afroman99/WannaOne_END)의 `react` 가지에서 Render 무료 웹 서비스(Docker, Virginia)로 올렸다. 위 Secrets 내용 전체를 Render 환경 변수 `CAST_SECRETS`에 넣고, 구글 OAuth 리디렉션 URI는 `https://cast-pdm.onrender.com/api/auth/callback`이다(서버가 접속한 주소로 만들므로 `[auth] redirect_uri`는 필요 없다). 설정 순서와 주의할 점은 `docs/react-migration.md`의 '배포'.
+- 배포 (2026-10-22 변경): **https://cast-pdm.onrender.com** — 같은 계산을 쓰는 React + FastAPI 화면(`web/`, `api/`)을 Fork(afroman99/WannaOne_END)의 `main` 브랜치에서(처음에는 `react` 가지) Render 무료 웹 서비스(Docker, Virginia)로 올렸다. 위 Secrets 내용 전체를 Render 환경 변수 `CAST_SECRETS`에 넣고, 구글 OAuth 리디렉션 URI는 `https://cast-pdm.onrender.com/api/auth/callback`이다(서버가 접속한 주소로 만들므로 `[auth] redirect_uri`는 필요 없다). 설정 순서와 주의할 점은 `docs/react-migration.md`의 '배포'.
   - 처음 배포(2026-10-16~10-22)는 Streamlit Community Cloud → Fork의 `main` 브랜치, 실행 파일 `app/dashboard.py`였고 10-22에 앱과 Streamlit 화면을 지웠다.
   - 팀 저장소의 변경은 Fork에서 Sync fork를 눌러야 반영된다. 모델을 바꾸면 `05_predict_test.py` → `python -m src.app_data`를 다시 실행해 `app_data/`를 커밋한다.
 

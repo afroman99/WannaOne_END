@@ -24,10 +24,10 @@ cd web && npm install && npm run build && cd ..                                 
 Hugging Face Spaces는 2026-10 기준 Docker가 유료(PRO)라 Render를 쓴다. 저장소 맨 위 `Dockerfile`이 화면을 빌드하고 서버를 켠다
 (원자료·모델·기록·비밀값은 `.dockerignore`와 `.gitignore`로 빠진다. 화면은 `app_data/`만 읽는다). 서버 최대 메모리는 약 263MB로 무료 512MB 안이다.
 
-**배포 주소: https://cast-pdm.onrender.com** (2026-10-22, 포크 afroman99/WannaOne_END의 `react` 가지, Virginia, Free).
+**배포 주소: https://cast-pdm.onrender.com** (2026-10-22, 포크 afroman99/WannaOne_END의 `main` 브랜치, Virginia, Free. 처음에는 `react` 가지에서 올렸다).
 설비관리자·작업자 계정 로그인과 공용 DB 저장을 이 주소에서 확인했다. Streamlit Cloud 앱(`cast-pdm.streamlit.app`)은 같은 날 지웠다.
 
-1. Render → New → **Web Service** → 깃허브 저장소, Branch **react**.
+1. Render → New → **Web Service** → 깃허브 저장소, Branch **main**. 이 브랜치에 push하면 Render가 자동으로 다시 배포한다.
 2. Language **Docker** (기본값 Python 3이면 Build/Start Command를 물어본다). Root Directory는 **비움**, Dockerfile Path `./Dockerfile`.
 3. Region **Virginia (US East)**: 공용 DB(Supabase)가 us-east-1이라 같은 지역에 둔다. Singapore에 두었을 때는 로그인 뒤 요청마다 DB 왕복이 길어 느렸다. 지역은 만든 뒤 바꿀 수 없어 서비스를 새로 만들어야 한다.
 4. Instance Type **Free** ($0, 0.1 CPU, 512MB). 아래 막대가 `$0 / month`인지 확인.

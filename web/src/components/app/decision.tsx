@@ -128,7 +128,7 @@ function SimpleAssign({ meta, d, now, onDone }: { meta: Meta; d: Decision; now: 
           </Select>
         </Field>
         <Button disabled={busy} onClick={() => run(() => api.assign({ sid: d.sid, team, title, priority, due_h: Number(due), reason, option: rec, guide }))}>
-          <Send strokeWidth={2} aria-hidden />작업자 화면으로 배정
+          <Send strokeWidth={2} aria-hidden />작업 지시
         </Button>
       </div>
       <Disclosure title="작업 내용 바꾸기 (작업명 · 우선순위 · 시작 시각 · 점검 가이드)">
@@ -268,7 +268,7 @@ export function DecisionPanel({ meta, sid, now, nowF, version, truth, onChanged,
                       <CardFooter>
                         <Button className="w-full" variant={c.kind === d.recKind ? 'default' : 'outline'} disabled={busy || picks[c.kind].members.length === 0}
                           onClick={() => assignCard(c)}>
-                          <Send strokeWidth={2} aria-hidden />작업자 화면으로 배정
+                          <Send strokeWidth={2} aria-hidden />작업 지시
                         </Button>
                       </CardFooter>
                     )}

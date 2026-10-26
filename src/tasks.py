@@ -188,7 +188,7 @@ class TaskStore:
         return r['value'] if r else default
 
     def set_setting(self, key, value):
-        value = clean(value, 100)
+        value = clean(value, 2000)       # 가정값(JSON, 약 400자)도 담는다. 100자로 자르면 읽지 못해 기본값으로 돌아갔다
         if not self.shared:
             self.settings[key] = value
             return
